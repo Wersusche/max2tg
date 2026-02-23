@@ -36,6 +36,7 @@ class MaxMessage:
     message_id: str = ""
     is_self: bool = False
     attaches: list = field(default_factory=list)
+    link: dict = field(default_factory=dict)
     raw: dict = field(default_factory=dict)
 
 
@@ -284,6 +285,7 @@ class MaxClient:
             timestamp=msg_body.get("time"),
             message_id=str(msg_body.get("id", "")),
             attaches=msg_body.get("attaches") or [],
+            link=msg_body.get("link") or {},
             raw=payload,
         )
 

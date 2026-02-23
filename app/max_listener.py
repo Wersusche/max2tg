@@ -152,6 +152,58 @@ async def _send_attach(
     return True
 
 
+async def _handle_linked_message(
+    link: dict,
+    link_type: str,
+    header_text: str,
+    client: MaxClient,
+    sender: TelegramSender,
+    resolver: ContactResolver,
+) -> None:
+    """Handle FORWARD or REPLY link inside a message."""
+    inner = link.get("message") or link
+    fwd_sender_id = inner.get("sender") or link.get("sender")
+    fwd_text = inner.get("text", "") or link.get("text", "")
+    fwd_attaches = inner.get("attaches") or link.get("attaches") or []
+
+    fwd_sender_label = ""
+    if fwd_sender_id:
+        fwd_sender_label = escape(await resolver.resolve_user(fwd_sender_id))
+
+    if link_type == "FORWARD":
+        prefix = "↩️ <b>Переслано</b>"
+        if fwd_sender_label:
+            prefix = f"↩️ <b>Переслано от {fwd_sender_label}</b>"
+    else:
+        prefix = "↩ <b>Ответ</b>"
+        if fwd_sender_label:
+            prefix = f"↩ <b>Ответ на {fwd_sender_label}</b>"
+
+    full_header = f"{header_text}\n{prefix}"
+
+    fwd_meaningful = [
+        a for a in fwd_attaches
+        if isinstance(a, dict) and a.get("_type") not in ("CONTROL", "WIDGET", "INLINE_KEYBOARD", None)
+    ]
+
+    if fwd_meaningful:
+        text_sent = False
+        for i, attach in enumerate(fwd_meaningful):
+            if i == 0 and fwd_text:
+                cap = f"{full_header}\n{escape(fwd_text)}"
+                text_sent = True
+            else:
+                cap = full_header
+            await _send_attach(attach, client, sender, cap)
+
+        if fwd_text and not text_sent:
+            await sender.send(f"{full_header}\n{escape(fwd_text)}")
+    elif fwd_text:
+        await sender.send(f"{full_header}\n{escape(fwd_text)}")
+    else:
+        await sender.send(f"{full_header}\n<i>[без содержимого]</i>")
+
+
 def _human_size(n: int) -> str:
     for unit in ("Б", "КБ", "МБ", "ГБ"):
         if n < 1024:
@@ -196,6 +248,16 @@ def create_max_client(
         is_dm = resolver.is_dm(msg.chat_id)
         chat_label = escape(resolver.chat_name(msg.chat_id))
         header_text = _header(msg, sender_label, chat_label, is_dm)
+
+        link = msg.link
+        link_type = link.get("type") if isinstance(link, dict) else None
+
+        if link_type in ("FORWARD", "REPLY"):
+            await _handle_linked_message(link, link_type, header_text, client, sender, resolver)
+            if msg.text:
+                await sender.send(f"{header_text}\n{escape(msg.text)}")
+            log.info("Forwarded link type=%s → TG", link_type)
+            return
 
         meaningful_attaches = [
             a for a in msg.attaches
