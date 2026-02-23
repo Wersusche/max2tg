@@ -9,12 +9,6 @@ from app.tg_sender import TelegramSender
 
 threading.stack_size(524288)
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-)
-logging.getLogger("aiohttp").setLevel(logging.WARNING)
-
 log = logging.getLogger("max2tg")
 
 
@@ -24,10 +18,23 @@ async def main():
 
     settings = load_settings()
 
+    level = logging.DEBUG if settings.debug else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        force=True,
+    )
+    logging.getLogger("aiohttp").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING if not settings.debug else logging.DEBUG)
+
+    log.info("Debug mode: %s", "ON" if settings.debug else "OFF")
+
     sender = TelegramSender(settings.tg_bot_token, settings.tg_chat_id)
     await sender.start()
 
-    client = create_max_client(settings.max_token, settings.max_device_id, sender)
+    client = create_max_client(settings.max_token, settings.max_device_id, sender, debug=settings.debug)
 
     log.info("Starting Max listener...")
     try:

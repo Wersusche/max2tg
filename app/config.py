@@ -10,6 +10,7 @@ class Settings:
     max_device_id: str
     tg_bot_token: str
     tg_chat_id: str
+    debug: bool = False
 
 
 def load_settings() -> Settings:
@@ -28,4 +29,5 @@ def load_settings() -> Settings:
         max_device_id=os.environ["MAX_DEVICE_ID"],
         tg_bot_token=os.environ["TG_BOT_TOKEN"],
         tg_chat_id=os.environ["TG_CHAT_ID"],
+        debug=os.environ.get("DEBUG", "").lower() in ("1", "true", "yes"),
     )

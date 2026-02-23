@@ -213,9 +213,9 @@ def _human_size(n: int) -> str:
 
 
 def create_max_client(
-    max_token: str, max_device_id: str, sender: TelegramSender
+    max_token: str, max_device_id: str, sender: TelegramSender, debug: bool = False
 ) -> MaxClient:
-    client = MaxClient(token=max_token, device_id=max_device_id)
+    client = MaxClient(token=max_token, device_id=max_device_id, debug=debug)
     resolver = ContactResolver(client=client)
 
     @client.on_ready

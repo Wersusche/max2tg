@@ -45,9 +45,10 @@ class MaxClient:
     HEARTBEAT_SEC = 30
     RECONNECT_SEC = 5
 
-    def __init__(self, token: str, device_id: str):
+    def __init__(self, token: str, device_id: str, debug: bool = False):
         self.token = token
         self.device_id = device_id
+        self.debug = debug
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._seq = 0
         self._my_id = None
@@ -124,7 +125,8 @@ class MaxClient:
             "Cache-Control": "no-cache",
         }
 
-        os.makedirs(DEBUG_DIR, exist_ok=True)
+        if self.debug:
+            os.makedirs(DEBUG_DIR, exist_ok=True)
 
         async with aiohttp.ClientSession():
             while True:
@@ -219,14 +221,15 @@ class MaxClient:
         elif op == OpCode.AUTH_SNAPSHOT and cmd == 1:
             self._my_id = payload.get("profile", {}).get("id")
             log.info("Authorized! my_id=%s", self._my_id)
-            self._dump_json("snapshot.json", payload)
+            if self.debug:
+                self._dump_json("snapshot.json", payload)
 
             if self._on_ready_cb:
                 await self._on_ready_cb(payload)
 
         elif op == OpCode.DISPATCH:
             self._dispatch_counter += 1
-            if self._dispatch_counter <= 20:
+            if self.debug and self._dispatch_counter <= 20:
                 self._dump_json(
                     f"dispatch_{self._dispatch_counter:04d}.json", payload
                 )
