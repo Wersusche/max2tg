@@ -1,8 +1,8 @@
 import asyncio
+import concurrent.futures
 import logging
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
 
 from app.config import load_settings
@@ -15,9 +15,26 @@ threading.stack_size(524288)
 log = logging.getLogger("max2tg")
 
 
+class _SyncExecutor(concurrent.futures.Executor):
+    """Executor that runs callables synchronously in the calling thread.
+
+    Used on low-resource servers where the OS cannot create new threads.
+    DNS resolution (getaddrinfo) will block the event loop for a few ms,
+    which is acceptable for a single-user forwarding bot.
+    """
+
+    def submit(self, fn, /, *args, **kwargs):
+        f: concurrent.futures.Future = concurrent.futures.Future()
+        try:
+            f.set_result(fn(*args, **kwargs))
+        except Exception as exc:
+            f.set_exception(exc)
+        return f
+
+
 async def main():
     loop = asyncio.get_running_loop()
-    loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+    loop.set_default_executor(_SyncExecutor())
 
     settings = load_settings()
 
