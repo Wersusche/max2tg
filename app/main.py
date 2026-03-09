@@ -3,6 +3,7 @@ import concurrent.futures
 import logging
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
 
 from app.config import load_settings
@@ -15,9 +16,11 @@ threading.stack_size(524288)
 log = logging.getLogger("max2tg")
 
 
-class _SyncExecutor(concurrent.futures.Executor):
-    """Executor that runs callables synchronously in the calling thread.
+class _SyncExecutor(ThreadPoolExecutor):
+    """ThreadPoolExecutor that runs callables synchronously without spawning threads.
 
+    Python 3.12 requires set_default_executor() to receive a ThreadPoolExecutor,
+    so we subclass it and override submit() to bypass _adjust_thread_count().
     Used on low-resource servers where the OS cannot create new threads.
     DNS resolution (getaddrinfo) will block the event loop for a few ms,
     which is acceptable for a single-user forwarding bot.
