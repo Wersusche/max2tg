@@ -217,7 +217,8 @@ max2tg/
 │   ├── test_config.py        # тесты загрузки настроек
 │   ├── test_max_client.py    # тесты клиента Max (опкоды, парсинг)
 │   ├── test_max_listener.py  # тесты форматирования сообщений
-│   └── test_resolver.py      # тесты резолвинга имён контактов
+│   ├── test_resolver.py      # тесты резолвинга имён контактов
+│   └── test_tg_handler.py    # тесты обработки ответов из Telegram
 ├── logs/                # логи (создаётся автоматически)
 ├── .env.example
 ├── Dockerfile
@@ -245,6 +246,7 @@ pytest
 - парсинг сообщений и опкоды WebSocket-клиента (`max_client.py`)
 - форматирование размеров файлов и определение типа медиа (`max_listener.py`)
 - резолвинг имён контактов и парсинг снапшота (`resolver.py`)
+- обработку ответов из Telegram и пересылку в Max (`tg_handler.py`)
 
 ---
 
@@ -306,6 +308,7 @@ cp .env.example .env
 |---|---|---|
 | `MAX_TOKEN` | yes | Max auth token |
 | `MAX_DEVICE_ID` | yes | Max device ID |
+| `MAX_CHAT_IDS` | no | Comma-separated list of Max chat IDs to listen to (all chats if unset) |
 | `TG_BOT_TOKEN` | yes | Telegram bot token |
 | `TG_CHAT_ID` | yes | Chat ID to forward messages to |
 | `DEBUG` | no | `true` — verbose logs + JSON dumps to `debug/` |
@@ -454,7 +457,8 @@ max2tg/
 │   ├── test_config.py        # settings loading tests
 │   ├── test_max_client.py    # Max client tests (opcodes, parsing)
 │   ├── test_max_listener.py  # message formatting tests
-│   └── test_resolver.py      # contact name resolution tests
+│   ├── test_resolver.py      # contact name resolution tests
+│   └── test_tg_handler.py    # Telegram reply handler tests
 ├── logs/                # log files (created automatically)
 ├── .env.example
 ├── Dockerfile
@@ -482,6 +486,7 @@ Test coverage:
 - message parsing and WebSocket opcodes (`max_client.py`)
 - file size formatting and media type detection (`max_listener.py`)
 - contact name resolution and snapshot parsing (`resolver.py`)
+- Telegram reply handling and forwarding to Max (`tg_handler.py`)
 
 ## License
 
