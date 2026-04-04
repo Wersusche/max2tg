@@ -80,6 +80,7 @@ async def _on_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     text = update.message.text
+    elements = []
     if update.message.chat.type in [telegram.constants.ChatType.GROUP, telegram.constants.ChatType.SUPERGROUP]:
         text = f"💬 {update.message.from_user.full_name}:\n{text}"
         elements = [
