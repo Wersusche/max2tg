@@ -88,7 +88,7 @@ class MaxClient:
     RECONNECT_SEC = 5
     chat_ids = []
 
-    def __init__(self, token: str, device_id: str, chat_ids: str, debug: bool = False):
+    def __init__(self, token: str, device_id: str, chat_ids: str | None = None, debug: bool = False):
         self.token = token
         self.device_id = device_id
         self.debug = debug
@@ -101,7 +101,8 @@ class MaxClient:
         self._session: aiohttp.ClientSession | None = None
         self._dispatch_counter = 0
         self._pending: dict[int, asyncio.Future] = {}
-        self.chat_ids += map(int, map(str.strip, chat_ids.split(',')))
+        if chat_ids:
+            self.chat_ids += map(int, map(str.strip, chat_ids.split(',')))
 
     # ── decorator API ──────────────────────────────────────────────
 
