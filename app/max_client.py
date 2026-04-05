@@ -101,6 +101,7 @@ class MaxClient:
         self._session: aiohttp.ClientSession | None = None
         self._dispatch_counter = 0
         self._pending: dict[int, asyncio.Future] = {}
+        self._on_disconnect_cb = None
         if chat_ids:
             self.chat_ids += map(int, map(str.strip, chat_ids.split(',')))
 
@@ -112,6 +113,10 @@ class MaxClient:
 
     def on_message(self, func):
         self._on_message_cb = func
+        return func
+
+    def on_disconnect(self, func):
+        self._on_disconnect_cb = func
         return func
 
     # ── transport ──────────────────────────────────────────────────
@@ -214,6 +219,12 @@ class MaxClient:
                         if not fut.done():
                             fut.cancel()
                     self._pending.clear()
+
+                if self._on_disconnect_cb:
+                    try:
+                        await self._on_disconnect_cb()
+                    except Exception:
+                        log.exception("on_disconnect callback error")
 
                 log.info("Reconnecting in %ds...", self.RECONNECT_SEC)
                 await asyncio.sleep(self.RECONNECT_SEC)

@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from html import escape
 
 from app.max_client import MaxClient, MaxMessage
@@ -221,8 +222,23 @@ def create_max_client(
     client = MaxClient(token=max_token, device_id=max_device_id, debug=debug, chat_ids=max_chat_ids)
     resolver = ContactResolver(client=client)
 
+    _first_connect = True
+    _notif_count = 0
+    _last_notif_time: datetime | None = None
+
+    def _can_notify() -> bool:
+        if _last_notif_time is None:
+            return True
+        elapsed = (datetime.now() - _last_notif_time).total_seconds()
+        if _notif_count == 1:
+            return elapsed >= 3600    # 2-е: через 1 час
+        if _notif_count == 2:
+            return elapsed >= 10800   # 3-е: через 3 часа
+        return elapsed >= 86400       # 4-е и далее: раз в сутки
+
     @client.on_ready
     async def handle_ready(snapshot: dict):
+        nonlocal _first_connect
         participant_ids = resolver.load_snapshot(snapshot)
 
         if participant_ids:
@@ -232,6 +248,23 @@ def create_max_client(
 
             log.info("Known chats: %s", resolver.chats)
             log.info("Known users: %s", resolver.users)
+
+        if not _first_connect:
+            await sender.send("✅ <b>Max:</b> соединение восстановлено")
+        else:
+            chat_count = len(resolver.chats)
+            await sender.send(f"✅ <b>Max:</b> подключён | чатов: {chat_count}")
+        _first_connect = False
+
+    @client.on_disconnect
+    async def handle_disconnect():
+        nonlocal _notif_count, _last_notif_time
+        if not _can_notify():
+            log.info("Disconnect notification suppressed (throttle)")
+            return
+        _notif_count += 1
+        _last_notif_time = datetime.now()
+        await sender.send("⚠️ <b>Max:</b> соединение потеряно, переподключение...")
 
     @client.on_message
     async def handle_message(msg: MaxMessage):
