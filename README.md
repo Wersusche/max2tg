@@ -24,6 +24,7 @@
 - Поддержка пересланных и цитируемых сообщений (forward / reply)
 - Разное оформление для личных и групповых чатов
 - Ответ из Telegram обратно в Max (опционально, через inline-кнопку)
+- Уведомления о статусе соединения с Max — при запуске, потере связи и восстановлении (с троттлингом, чтобы не спамить)
 - Работает как userbot — подключается к вашему аккаунту Max через WebSocket
 - Docker-ready: разворачивается одной командой
 
@@ -214,11 +215,12 @@ max2tg/
 │   ├── tg_sender.py      # отправка сообщений в Telegram
 │   └── tg_handler.py     # обработка ответов из Telegram
 ├── tests/
-│   ├── test_config.py        # тесты загрузки настроек
-│   ├── test_max_client.py    # тесты клиента Max (опкоды, парсинг)
-│   ├── test_max_listener.py  # тесты форматирования сообщений
-│   ├── test_resolver.py      # тесты резолвинга имён контактов
-│   └── test_tg_handler.py    # тесты обработки ответов из Telegram
+│   ├── test_config.py             # тесты загрузки настроек
+│   ├── test_max_client.py         # тесты клиента Max (опкоды, парсинг)
+│   ├── test_max_listener.py       # тесты форматирования сообщений
+│   ├── test_resolver.py           # тесты резолвинга имён контактов
+│   ├── test_tg_handler.py         # тесты обработки ответов из Telegram
+│   └── test_disconnect_notify.py  # тесты уведомлений о статусе соединения
 ├── logs/                # логи (создаётся автоматически)
 ├── .env.example
 ├── Dockerfile
@@ -247,6 +249,7 @@ pytest
 - форматирование размеров файлов и определение типа медиа (`max_listener.py`)
 - резолвинг имён контактов и парсинг снапшота (`resolver.py`)
 - обработку ответов из Telegram и пересылку в Max (`tg_handler.py`)
+- уведомления о статусе соединения и логику троттлинга (`test_disconnect_notify.py`)
 
 ---
 
@@ -264,6 +267,7 @@ Real-time message forwarding from **Max** messenger (max.ru) to **Telegram** —
 - Supports forwarded and quoted messages (forward / reply)
 - Different formatting for DMs and group chats
 - Reply from Telegram back to Max (optional, via inline button)
+- Connection status notifications — on startup, disconnect, and reconnect (throttled to avoid spam)
 - Works as a userbot — connects to your Max account via WebSocket
 - Docker-ready: deploy with a single command
 
@@ -454,11 +458,12 @@ max2tg/
 │   ├── tg_sender.py      # sends messages to Telegram
 │   └── tg_handler.py     # handles replies from Telegram
 ├── tests/
-│   ├── test_config.py        # settings loading tests
-│   ├── test_max_client.py    # Max client tests (opcodes, parsing)
-│   ├── test_max_listener.py  # message formatting tests
-│   ├── test_resolver.py      # contact name resolution tests
-│   └── test_tg_handler.py    # Telegram reply handler tests
+│   ├── test_config.py             # settings loading tests
+│   ├── test_max_client.py         # Max client tests (opcodes, parsing)
+│   ├── test_max_listener.py       # message formatting tests
+│   ├── test_resolver.py           # contact name resolution tests
+│   ├── test_tg_handler.py         # Telegram reply handler tests
+│   └── test_disconnect_notify.py  # connection status notification tests
 ├── logs/                # log files (created automatically)
 ├── .env.example
 ├── Dockerfile
@@ -487,6 +492,7 @@ Test coverage:
 - file size formatting and media type detection (`max_listener.py`)
 - contact name resolution and snapshot parsing (`resolver.py`)
 - Telegram reply handling and forwarding to Max (`tg_handler.py`)
+- connection status notifications and throttle logic (`test_disconnect_notify.py`)
 
 ## License
 
