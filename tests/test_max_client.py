@@ -253,3 +253,25 @@ class TestMaxClientInit:
 
     def test_reconnect_sec_constant(self):
         assert MaxClient.RECONNECT_SEC == 5
+
+    def test_on_disconnect_cb_initial_none(self):
+        c = MaxClient(token="tok", device_id="dev")
+        assert c._on_disconnect_cb is None
+
+    def test_on_disconnect_decorator_registers_callback(self):
+        c = MaxClient(token="tok", device_id="dev")
+
+        @c.on_disconnect
+        async def my_handler():
+            pass
+
+        assert c._on_disconnect_cb is my_handler
+
+    def test_on_disconnect_returns_function(self):
+        c = MaxClient(token="tok", device_id="dev")
+
+        async def my_handler():
+            pass
+
+        result = c.on_disconnect(my_handler)
+        assert result is my_handler
