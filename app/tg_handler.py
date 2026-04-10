@@ -3,8 +3,6 @@ import logging
 from telegram import Update
 from telegram.ext import (
     Application,
-    CallbackQueryHandler,
-    CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
@@ -12,6 +10,7 @@ from telegram.ext import (
 import telegram.constants
 
 from app.max_client import MaxClient
+from app.topic_store import TopicStore
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +18,7 @@ PENDING_REPLY_KEY = "pending_reply_chat_id"
 PENDING_REPLY_LABEL_KEY = "pending_reply_label"
 
 _ALLOWED_CHAT_ID_KEY = "allowed_chat_id"
+_TOPIC_STORE_KEY = "topic_store"
 
 
 async def _on_reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -101,16 +101,100 @@ async def _on_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("⚠️ Ошибка при отправке в Max.")
 
 
-def build_tg_app(token: str, max_client: MaxClient, allowed_chat_id: str) -> Application:
+def _parse_max_chat_id(value: str):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _message_text_or_caption(update: Update) -> str | None:
+    message = update.message
+    if not message:
+        return None
+    return message.text or message.caption
+
+
+async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Forward Telegram forum topic messages to the mapped Max chat."""
+    message = update.message
+    if not message:
+        return
+
+    sender_user = getattr(message, "from_user", None)
+    if getattr(sender_user, "is_bot", False) is True:
+        return
+
+    allowed_chat_id = context.bot_data.get(_ALLOWED_CHAT_ID_KEY)
+    if allowed_chat_id is None:
+        return
+    if update.effective_chat.id != allowed_chat_id:
+        return
+
+    message_thread_id = getattr(message, "message_thread_id", None)
+    if message_thread_id is None:
+        return
+
+    topic_store: TopicStore | None = context.bot_data.get(_TOPIC_STORE_KEY)
+    if topic_store is None:
+        await message.reply_text("⚠️ Хранилище топиков не подключено.")
+        return
+
+    mapping = topic_store.get_by_thread(int(allowed_chat_id), int(message_thread_id))
+    if mapping is None:
+        if _message_text_or_caption(update):
+            await message.reply_text(
+                "⚠️ Не знаю, какому чату Max соответствует этот топик. "
+                "Дождитесь входящего сообщения из Max, чтобы бот создал тему."
+            )
+        return
+
+    max_client: MaxClient | None = context.bot_data.get("max_client")
+    if not max_client:
+        await message.reply_text("⚠️ Max клиент не подключён.")
+        return
+
+    text = _message_text_or_caption(update)
+    if not text:
+        if getattr(message, "effective_attachment", None) is not None:
+            await message.reply_text("⚠️ Пока умею отправлять в Max только текст и подписи к медиа.")
+        return
+
+    elements = []
+    if message.chat.type in [telegram.constants.ChatType.GROUP, telegram.constants.ChatType.SUPERGROUP]:
+        sender_name = message.from_user.full_name if message.from_user else "Telegram"
+        text = f"💬 {sender_name}:\n{text}"
+        elements = [
+            {
+                "type": "STRONG",
+                "length": len(sender_name) + 1,
+                "from": 2,
+            }
+        ]
+
+    try:
+        resp = await max_client.send_message(_parse_max_chat_id(mapping.max_chat_id), text, elements)
+        if not resp:
+            await message.reply_text("⚠️ Не удалось отправить сообщение в Max.")
+    except Exception:
+        log.exception("Failed to send Telegram topic message to Max chat %s", mapping.max_chat_id)
+        await message.reply_text("⚠️ Ошибка при отправке в Max.")
+
+
+def build_tg_app(
+    token: str,
+    max_client: MaxClient,
+    allowed_chat_id: str,
+    topic_store: TopicStore,
+) -> Application:
     """Build and configure the Telegram Application with handlers."""
     app = Application.builder().token(token).build()
     app.bot_data["max_client"] = max_client
     app.bot_data[_ALLOWED_CHAT_ID_KEY] = int(allowed_chat_id)
+    app.bot_data[_TOPIC_STORE_KEY] = topic_store
 
     chat_filter = filters.Chat(chat_id=int(allowed_chat_id))
 
-    app.add_handler(CallbackQueryHandler(_on_reply_button, pattern=r"^reply:"))
-    app.add_handler(CommandHandler("cancel", _on_cancel, filters=chat_filter))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & chat_filter, _on_text_reply))
+    app.add_handler(MessageHandler(chat_filter & ~filters.COMMAND, _on_topic_message))
 
     return app

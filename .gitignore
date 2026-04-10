@@ -1,7 +1,10 @@
 .env
 __pycache__/
 *.pyc
+.pytest_cache/
+pytest-cache-files-*/
 .venv/
+data/
 debug/
 .claude/
 *.code*
