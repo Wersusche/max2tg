@@ -1,7 +1,12 @@
 """Tests for app/max_listener.py — pure helper functions."""
 
 import pytest
-from app.max_listener import _human_size, _guess_media_kind
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from telegram.error import BadRequest
+
+from app.max_client import MaxMessage
+from app.max_listener import _human_size, _guess_media_kind, create_max_client
 
 
 # ---------------------------------------------------------------------------
@@ -144,3 +149,81 @@ class TestGuessMediaKind:
     # Extension appearing in the middle of filename should not trigger false match
     def test_mp4_in_name_not_extension_is_document(self):
         assert _guess_media_kind("mp4_notes.txt") == "document"
+
+
+# ---------------------------------------------------------------------------
+# Topic routing in create_max_client
+# ---------------------------------------------------------------------------
+
+class TestTopicRouting:
+    def _make_client(self, is_dm=True):
+        sender = AsyncMock()
+        sender.send = AsyncMock(return_value="ok")
+        sender.send_photo = AsyncMock(return_value="ok")
+
+        router = MagicMock()
+        router.ensure_topic = AsyncMock(return_value=77)
+
+        resolver = MagicMock()
+        resolver.resolve_user = AsyncMock(return_value="Alice")
+        resolver.is_dm.return_value = is_dm
+        resolver.chat_name.return_value = "Max Group"
+        resolver.load_snapshot.return_value = []
+
+        with patch("app.max_listener.ContactResolver", return_value=resolver):
+            client = create_max_client(
+                max_token="tok",
+                max_device_id="dev",
+                sender=sender,
+                topic_router=router,
+            )
+
+        return client, sender, router, resolver
+
+    @pytest.mark.asyncio
+    async def test_dm_uses_sender_name_as_topic(self):
+        client, sender, router, _resolver = self._make_client(is_dm=True)
+        msg = MaxMessage(chat_id=100, sender_id=2, text="Hi")
+
+        await client._on_message_cb(msg)
+
+        router.ensure_topic.assert_awaited_once_with(100, "Alice")
+        assert sender.send.call_args.kwargs["message_thread_id"] == 77
+        assert sender.send.call_args.kwargs["raise_bad_request"] is True
+
+    @pytest.mark.asyncio
+    async def test_group_uses_chat_name_as_topic(self):
+        client, _sender, router, _resolver = self._make_client(is_dm=False)
+        msg = MaxMessage(chat_id=200, sender_id=2, text="Hi")
+
+        await client._on_message_cb(msg)
+
+        router.ensure_topic.assert_awaited_once_with(200, "Max Group")
+
+    @pytest.mark.asyncio
+    async def test_attachment_goes_to_topic_thread(self):
+        client, sender, _router, _resolver = self._make_client(is_dm=False)
+        client.download_file = AsyncMock(return_value=b"image")
+        msg = MaxMessage(
+            chat_id=200,
+            sender_id=2,
+            attaches=[{"_type": "PHOTO", "baseUrl": "https://example.com/a.jpg"}],
+        )
+
+        await client._on_message_cb(msg)
+
+        sender.send_photo.assert_awaited_once()
+        assert sender.send_photo.call_args.kwargs["message_thread_id"] == 77
+
+    @pytest.mark.asyncio
+    async def test_stale_topic_mapping_is_recreated_once(self):
+        client, sender, router, _resolver = self._make_client(is_dm=True)
+        router.ensure_topic = AsyncMock(side_effect=[77, 88])
+        sender.send = AsyncMock(side_effect=[BadRequest("Message thread not found"), "ok"])
+        msg = MaxMessage(chat_id=100, sender_id=2, text="Hi")
+
+        await client._on_message_cb(msg)
+
+        router.forget_max_chat.assert_called_once_with(100)
+        assert router.ensure_topic.await_count == 2
+        assert sender.send.await_args_list[1].kwargs["message_thread_id"] == 88

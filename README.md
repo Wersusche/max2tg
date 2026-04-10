@@ -23,7 +23,7 @@
 - Пересылка текстовых сообщений, фото, видео, файлов, аудио, стикеров, контактов, геолокаций и ссылок
 - Поддержка пересланных и цитируемых сообщений (forward / reply)
 - Разное оформление для личных и групповых чатов
-- Ответ из Telegram обратно в Max (опционально, через inline-кнопку)
+- Отдельная Telegram-тема для каждого чата Max и ответы из этих тем обратно в Max
 - Уведомления о статусе соединения с Max — при запуске, потере связи и восстановлении (с троттлингом, чтобы не спамить)
 - Работает как userbot — подключается к вашему аккаунту Max через WebSocket
 - Docker-ready: разворачивается одной командой
@@ -52,8 +52,8 @@
 
 1. Напишите [@BotFather](https://t.me/BotFather) в Telegram → `/newbot` → следуйте инструкциям
 2. Скопируйте полученный токен → это ваш `TG_BOT_TOKEN`
-3. Узнайте свой chat ID: напишите [@userinfobot](https://t.me/userinfobot) → он ответит вашим ID → это `TG_CHAT_ID`
-4. **Важно:** напишите вашему боту `/start`, чтобы он мог вам отправлять сообщения
+3. Создайте супергруппу Telegram, включите в ней темы, добавьте бота администратором с правом управлять темами
+4. Узнайте ID этой супергруппы — это `TG_CHAT_ID`
 
 ## Настройка
 
@@ -71,9 +71,10 @@ cp .env.example .env
 | `MAX_DEVICE_ID` | да           | ID устройства Max                              |
 | `MAX_CHAT_IDS`  | нет          | список ID чатов Max, разделенных запятой       |
 | `TG_BOT_TOKEN`  | да           | Токен Telegram-бота                            |
-| `TG_CHAT_ID`    | да           | ID чата, куда пересылать сообщения             |
+| `TG_CHAT_ID`    | да           | ID Telegram-супергруппы с включёнными темами   |
+| `TOPIC_DB_PATH` | нет          | SQLite-файл соответствий Max↔Telegram-топики   |
 | `DEBUG`         | нет          | `true` — подробные логи + дамп JSON в `debug/` |
-| `REPLY_ENABLED` | нет          | `true` — разрешить ответы из Telegram в Max    |
+| `REPLY_ENABLED` | нет          | `true` — разрешить ответы из Telegram-тем в Max |
 | `LOG_DIR`       | нет          | Путь к директории логов (по умолчанию `logs`)  |
 
 ## Запуск
@@ -95,7 +96,7 @@ docker-compose up -d
 docker-compose logs -f
 ```
 
-Логи на диске доступны на хосте в директории `./logs/` — файл `max2tg.log` с ротацией по 10 МБ (хранится 5 файлов):
+Логи на диске доступны на хосте в директории `./logs/` — файл `max2tg.log` с ротацией по 10 МБ (хранится 5 файлов). Соответствия Max↔Telegram-топики хранятся в `./data/topics.sqlite3`:
 
 ```bash
 tail -f logs/max2tg.log
@@ -193,14 +194,14 @@ sudo journalctl -u max2tg -f
 ## Как это работает
 
 ```
-Max (WebSocket) ──→ max2tg ──→ Telegram Bot ──→ Ваш чат
+Max (WebSocket) ──→ max2tg ──→ Telegram Bot ──→ темы в вашем TG_CHAT_ID
                        ↑                            │
                        └── (если REPLY_ENABLED) ────┘
 ```
 
 1. Приложение подключается к Max через WebSocket как ваш аккаунт
-2. Новые входящие сообщения пересылаются в указанный Telegram-чат
-3. Если `REPLY_ENABLED=true`, под каждым сообщением появляется кнопка «Ответить» — нажав её, можно написать текст, который отправится обратно в соответствующий чат Max
+2. Для каждого чата Max бот находит или создаёт отдельную тему Telegram и пересылает сообщения туда
+3. Если `REPLY_ENABLED=true`, текст и подписи к медиа, написанные в теме Telegram, отправляются обратно в соответствующий чат Max
 
 ## Структура проекта
 
@@ -212,6 +213,8 @@ max2tg/
 │   ├── max_client.py     # WebSocket-клиент Max
 │   ├── max_listener.py   # обработка и форматирование сообщений
 │   ├── resolver.py       # кеш и резолвинг имён контактов/чатов
+│   ├── topic_router.py   # создание и выбор Telegram-топиков для Max-чатов
+│   ├── topic_store.py    # SQLite-хранилище соответствий топиков
 │   ├── tg_sender.py      # отправка сообщений в Telegram
 │   └── tg_handler.py     # обработка ответов из Telegram
 ├── tests/
@@ -221,6 +224,7 @@ max2tg/
 │   ├── test_resolver.py           # тесты резолвинга имён контактов
 │   ├── test_tg_handler.py         # тесты обработки ответов из Telegram
 │   └── test_disconnect_notify.py  # тесты уведомлений о статусе соединения
+├── data/                # SQLite-хранилище топиков (создаётся автоматически)
 ├── logs/                # логи (создаётся автоматически)
 ├── .env.example
 ├── Dockerfile
@@ -248,7 +252,8 @@ pytest
 - парсинг сообщений и опкоды WebSocket-клиента (`max_client.py`)
 - форматирование размеров файлов и определение типа медиа (`max_listener.py`)
 - резолвинг имён контактов и парсинг снапшота (`resolver.py`)
-- обработку ответов из Telegram и пересылку в Max (`tg_handler.py`)
+- SQLite-хранилище и маршрутизацию Telegram-топиков
+- обработку сообщений из Telegram-топиков и пересылку в Max (`tg_handler.py`)
 - уведомления о статусе соединения и логику троттлинга (`test_disconnect_notify.py`)
 
 ---
@@ -266,7 +271,7 @@ Real-time message forwarding from **Max** messenger (max.ru) to **Telegram** —
 - Forwards text messages, photos, videos, files, audio, stickers, contacts, locations, and links
 - Supports forwarded and quoted messages (forward / reply)
 - Different formatting for DMs and group chats
-- Reply from Telegram back to Max (optional, via inline button)
+- A separate Telegram topic for each Max chat and replies from those topics back to Max
 - Connection status notifications — on startup, disconnect, and reconnect (throttled to avoid spam)
 - Works as a userbot — connects to your Max account via WebSocket
 - Docker-ready: deploy with a single command
@@ -295,8 +300,8 @@ Real-time message forwarding from **Max** messenger (max.ru) to **Telegram** —
 
 1. Message [@BotFather](https://t.me/BotFather) on Telegram → `/newbot` → follow the instructions
 2. Copy the token → this is your `TG_BOT_TOKEN`
-3. Get your chat ID: message [@userinfobot](https://t.me/userinfobot) → it replies with your ID → this is `TG_CHAT_ID`
-4. **Important:** send `/start` to your bot so it can message you
+3. Create a Telegram supergroup, enable topics, and add the bot as an admin with topic management rights
+4. Get this supergroup ID — this is `TG_CHAT_ID`
 
 ## Configuration
 
@@ -314,9 +319,10 @@ cp .env.example .env
 | `MAX_DEVICE_ID` | yes | Max device ID |
 | `MAX_CHAT_IDS` | no | Comma-separated list of Max chat IDs to listen to (all chats if unset) |
 | `TG_BOT_TOKEN` | yes | Telegram bot token |
-| `TG_CHAT_ID` | yes | Chat ID to forward messages to |
+| `TG_CHAT_ID` | yes | Forum-enabled Telegram supergroup ID |
+| `TOPIC_DB_PATH` | no | SQLite file for Max↔Telegram topic mappings |
 | `DEBUG` | no | `true` — verbose logs + JSON dumps to `debug/` |
-| `REPLY_ENABLED` | no | `true` — enable replies from Telegram to Max |
+| `REPLY_ENABLED` | no | `true` — enable replies from Telegram topics to Max |
 | `LOG_DIR` | no | Log directory path (default: `logs`) |
 
 ## Running
@@ -338,7 +344,7 @@ Docker logs (stdout):
 docker-compose logs -f
 ```
 
-Persistent logs are available on the host in `./logs/` — file `max2tg.log` with rotation at 10 MB (5 files kept):
+Persistent logs are available on the host in `./logs/` — file `max2tg.log` with rotation at 10 MB (5 files kept). Max↔Telegram topic mappings are stored in `./data/topics.sqlite3`:
 
 ```bash
 tail -f logs/max2tg.log
@@ -436,14 +442,14 @@ sudo journalctl -u max2tg -f
 ## How It Works
 
 ```
-Max (WebSocket) ──→ max2tg ──→ Telegram Bot ──→ Your chat
+Max (WebSocket) ──→ max2tg ──→ Telegram Bot ──→ topics in TG_CHAT_ID
                        ↑                            │
                        └── (if REPLY_ENABLED) ──────┘
 ```
 
 1. The app connects to Max via WebSocket using your account credentials
-2. Incoming messages are forwarded to the specified Telegram chat
-3. If `REPLY_ENABLED=true`, each message includes a "Reply" button — press it, type your response, and it gets sent back to the corresponding Max chat
+2. For each Max chat, the bot finds or creates a dedicated Telegram topic and forwards messages there
+3. If `REPLY_ENABLED=true`, text and media captions written in a Telegram topic are sent back to the corresponding Max chat
 
 ## Project Structure
 
@@ -455,6 +461,8 @@ max2tg/
 │   ├── max_client.py     # Max WebSocket client
 │   ├── max_listener.py   # message processing and formatting
 │   ├── resolver.py       # contact/chat name cache and resolution
+│   ├── topic_router.py   # creates and selects Telegram topics for Max chats
+│   ├── topic_store.py    # SQLite storage for topic mappings
 │   ├── tg_sender.py      # sends messages to Telegram
 │   └── tg_handler.py     # handles replies from Telegram
 ├── tests/
@@ -464,6 +472,7 @@ max2tg/
 │   ├── test_resolver.py           # contact name resolution tests
 │   ├── test_tg_handler.py         # Telegram reply handler tests
 │   └── test_disconnect_notify.py  # connection status notification tests
+├── data/                # topic mapping database (created automatically)
 ├── logs/                # log files (created automatically)
 ├── .env.example
 ├── Dockerfile
@@ -491,7 +500,8 @@ Test coverage:
 - message parsing and WebSocket opcodes (`max_client.py`)
 - file size formatting and media type detection (`max_listener.py`)
 - contact name resolution and snapshot parsing (`resolver.py`)
-- Telegram reply handling and forwarding to Max (`tg_handler.py`)
+- SQLite topic storage and Telegram topic routing
+- Telegram topic message handling and forwarding to Max (`tg_handler.py`)
 - connection status notifications and throttle logic (`test_disconnect_notify.py`)
 
 ## License

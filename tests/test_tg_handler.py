@@ -6,10 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app.tg_handler import (
     PENDING_REPLY_KEY,
     PENDING_REPLY_LABEL_KEY,
+    _on_topic_message,
     _on_cancel,
     _on_reply_button,
     _on_text_reply,
 )
+from app.topic_store import TopicStore
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +54,32 @@ def _make_message_update(text: str, chat_type: str = "private", user_name: str =
     update.message.chat.type = chat_type
     update.message.from_user = MagicMock()
     update.message.from_user.full_name = user_name
+    update.message.reply_text = AsyncMock()
+    return update
+
+
+def _make_topic_update(
+    text: str | None = "Hello",
+    caption: str | None = None,
+    thread_id: int = 10,
+    chat_id: int = -100,
+    user_name: str = "Alice",
+    attachment=None,
+):
+    import telegram.constants
+    update = MagicMock()
+    update.effective_chat = MagicMock()
+    update.effective_chat.id = chat_id
+    update.message = MagicMock()
+    update.message.text = text
+    update.message.caption = caption
+    update.message.message_thread_id = thread_id
+    update.message.effective_attachment = attachment
+    update.message.chat = MagicMock()
+    update.message.chat.type = telegram.constants.ChatType.SUPERGROUP
+    update.message.from_user = MagicMock()
+    update.message.from_user.full_name = user_name
+    update.message.from_user.is_bot = False
     update.message.reply_text = AsyncMock()
     return update
 
@@ -270,6 +298,7 @@ class TestOnTextReply:
         args = update.message.reply_text.call_args[0][0]
         assert "⚠️" in args
 
+
     @pytest.mark.asyncio
     async def test_replies_warning_on_send_failure(self):
         max_client = MagicMock()
@@ -301,3 +330,85 @@ class TestOnTextReply:
 
         args = update.message.reply_text.call_args[0][0]
         assert "⚠️" in args
+
+
+# ---------------------------------------------------------------------------
+# _on_topic_message
+# ---------------------------------------------------------------------------
+
+class TestOnTopicMessage:
+    def _make_context(self, tmp_path, mapping=True, max_client=None):
+        store = TopicStore(str(tmp_path / "topics.sqlite3"))
+        if mapping:
+            store.upsert_mapping(-100, 42, 10, "Alice")
+        if max_client is None:
+            max_client = MagicMock()
+            max_client.send_message = AsyncMock(return_value={"ok": True})
+        ctx = _make_context(
+            bot_data={
+                "allowed_chat_id": -100,
+                "topic_store": store,
+                "max_client": max_client,
+            }
+        )
+        return ctx, store, max_client
+
+    @pytest.mark.asyncio
+    async def test_sends_topic_text_to_mapped_max_chat(self, tmp_path):
+        ctx, store, max_client = self._make_context(tmp_path)
+        update = _make_topic_update(text="Hello", user_name="Bob")
+
+        await _on_topic_message(update, ctx)
+
+        call_args = max_client.send_message.call_args
+        assert call_args[0][0] == 42
+        assert "Bob" in call_args[0][1]
+        assert "Hello" in call_args[0][1]
+        assert call_args[0][2] != []
+        update.message.reply_text.assert_not_called()
+        store.close()
+
+    @pytest.mark.asyncio
+    async def test_sends_caption_to_mapped_max_chat(self, tmp_path):
+        ctx, store, max_client = self._make_context(tmp_path)
+        update = _make_topic_update(text=None, caption="Photo caption", user_name="Carol")
+
+        await _on_topic_message(update, ctx)
+
+        sent_text = max_client.send_message.call_args[0][1]
+        assert "Carol" in sent_text
+        assert "Photo caption" in sent_text
+        store.close()
+
+    @pytest.mark.asyncio
+    async def test_unknown_topic_warns_and_does_not_send(self, tmp_path):
+        ctx, store, max_client = self._make_context(tmp_path, mapping=False)
+        update = _make_topic_update(text="Hello")
+
+        await _on_topic_message(update, ctx)
+
+        max_client.send_message.assert_not_called()
+        update.message.reply_text.assert_called_once()
+        store.close()
+
+    @pytest.mark.asyncio
+    async def test_media_without_caption_warns_and_does_not_send(self, tmp_path):
+        ctx, store, max_client = self._make_context(tmp_path)
+        update = _make_topic_update(text=None, caption=None, attachment=object())
+
+        await _on_topic_message(update, ctx)
+
+        max_client.send_message.assert_not_called()
+        update.message.reply_text.assert_called_once()
+        store.close()
+
+    @pytest.mark.asyncio
+    async def test_message_from_another_chat_is_ignored(self, tmp_path):
+        ctx, store, max_client = self._make_context(tmp_path)
+        update = _make_topic_update(text="Hello", chat_id=-200)
+
+        await _on_topic_message(update, ctx)
+
+        max_client.send_message.assert_not_called()
+        update.message.reply_text.assert_not_called()
+        store.close()

@@ -51,6 +51,7 @@ class TestSettingsDataclass:
         assert s.debug is False
         assert s.reply_enabled is False
         assert s.max_chat_ids is None
+        assert s.topic_db_path == "data/topics.sqlite3"
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +129,14 @@ class TestLoadSettingsValid:
     def test_max_chat_ids_none_when_empty_string(self):
         s = _load_settings_with_env(_env(MAX_CHAT_IDS=""))
         assert s.max_chat_ids is None
+
+    def test_topic_db_path_default(self):
+        s = _load_settings_with_env(_env())
+        assert s.topic_db_path == "data/topics.sqlite3"
+
+    def test_topic_db_path_can_be_overridden(self):
+        s = _load_settings_with_env(_env(TOPIC_DB_PATH="/tmp/max2tg/topics.sqlite3"))
+        assert s.topic_db_path == "/tmp/max2tg/topics.sqlite3"
 
 
 # ---------------------------------------------------------------------------

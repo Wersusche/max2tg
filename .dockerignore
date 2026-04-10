@@ -12,6 +12,7 @@ README.md
 __pycache__
 *.pyc
 .venv
+data/
 debug/
 tests/
 app/debug
