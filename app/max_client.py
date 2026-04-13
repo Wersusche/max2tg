@@ -20,6 +20,7 @@ def _log_task_exception(task: "asyncio.Task") -> None:
     if not task.cancelled() and task.exception() is not None:
         log.exception("Unhandled exception in background task", exc_info=task.exception())
 
+
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -65,7 +66,9 @@ class OpCode(IntEnum):
     CONTACT_PRESENCE = 35
     CHAT_GET = 48
     SEND_MESSAGE = 64
+    UPLOAD_ATTACH = 65
     EDIT_MESSAGE = 67
+    PHOTO_UPLOAD_URL = 80
     DISPATCH = 128
 
 
@@ -86,7 +89,6 @@ class MaxClient:
     WS_URL = "wss://ws-api.oneme.ru/websocket"
     HEARTBEAT_SEC = 30
     RECONNECT_SEC = 5
-    chat_ids = []
 
     def __init__(self, token: str, device_id: str, chat_ids: str | None = None, debug: bool = False):
         self.token = token
@@ -102,10 +104,9 @@ class MaxClient:
         self._dispatch_counter = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._on_disconnect_cb = None
+        self.chat_ids: list[int] = []
         if chat_ids:
-            self.chat_ids += map(int, map(str.strip, chat_ids.split(',')))
-
-    # ── decorator API ──────────────────────────────────────────────
+            self.chat_ids = list(map(int, map(str.strip, chat_ids.split(","))))
 
     def on_ready(self, func):
         self._on_ready_cb = func
@@ -118,8 +119,6 @@ class MaxClient:
     def on_disconnect(self, func):
         self._on_disconnect_cb = func
         return func
-
-    # ── transport ──────────────────────────────────────────────────
 
     async def _send(self, opcode: int, payload: dict) -> int:
         if not self._ws or self._ws.closed:
@@ -139,7 +138,7 @@ class MaxClient:
         return seq
 
     async def cmd(self, opcode: int, payload: dict, timeout: float = 10) -> dict:
-        """Send a request and wait for the response (cmd=1 with same seq)."""
+        """Send a request and wait for the response payload."""
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[dict] = loop.create_future()
         seq = await self._send(opcode, payload)
@@ -164,8 +163,6 @@ class MaxClient:
                 log.exception("Heartbeat error, stopping heartbeat loop")
                 break
 
-    # ── main loop ──────────────────────────────────────────────────
-
     async def run(self):
         if self.debug:
             os.makedirs(DEBUG_DIR, exist_ok=True)
@@ -175,9 +172,7 @@ class MaxClient:
             while True:
                 try:
                     log.info("Connecting to %s ...", self.WS_URL)
-                    async with session.ws_connect(
-                        self.WS_URL, headers=_WS_HEADERS
-                    ) as ws:
+                    async with session.ws_connect(self.WS_URL, headers=_WS_HEADERS) as ws:
                         self._ws = ws
                         self._seq = 0
                         self._pending.clear()
@@ -195,17 +190,12 @@ class MaxClient:
                             },
                         )
 
-                        self._heartbeat_task = asyncio.create_task(
-                            self._heartbeat_loop()
-                        )
+                        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
                         async for msg in ws:
                             if msg.type == aiohttp.WSMsgType.TEXT:
                                 await self._handle(json.loads(msg.data))
-                            elif msg.type in (
-                                aiohttp.WSMsgType.CLOSED,
-                                aiohttp.WSMsgType.ERROR,
-                            ):
+                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                                 log.warning("WebSocket closed/error: %s", msg.type)
                                 break
 
@@ -229,37 +219,30 @@ class MaxClient:
                 log.info("Reconnecting in %ds...", self.RECONNECT_SEC)
                 await asyncio.sleep(self.RECONNECT_SEC)
 
-    # ── event dispatcher ───────────────────────────────────────────
-
     async def _handle(self, data: dict):
         op = data.get("opcode")
         cmd = data.get("cmd")
         seq = data.get("seq")
         payload = data.get("payload", {})
 
-        # cmd=1 is a response to our request — resolve the pending future
         if cmd == 1 and seq in self._pending:
             fut = self._pending.pop(seq)
             if not fut.done():
                 fut.set_result(payload)
             if op not in (OpCode.HANDSHAKE, OpCode.AUTH_SNAPSHOT):
                 log.debug("<<< RESP  op=%-4s seq=%s", op, seq)
-
-        # cmd=3 is an error response
         elif cmd == 3 and seq in self._pending:
             fut = self._pending.pop(seq)
             if not fut.done():
                 fut.set_result({})
             log.warning("<<< ERROR op=%-4s seq=%s | %s", op, seq, payload)
-
-        # server-initiated events — not a reply to one of our requests
         else:
             payload_preview = json.dumps(payload, ensure_ascii=False)
             if len(payload_preview) > 3000:
-                payload_preview = payload_preview[:3000] + "…"
+                payload_preview = payload_preview[:3000] + "..."
 
             if op == OpCode.HANDSHAKE and cmd == 1:
-                log.info("Handshake OK → sending auth token...")
+                log.info("Handshake OK -> sending auth token...")
                 await self._send(
                     OpCode.AUTH_SNAPSHOT,
                     {
@@ -268,7 +251,6 @@ class MaxClient:
                         "token": self.token,
                     },
                 )
-
             elif op == OpCode.AUTH_SNAPSHOT and cmd == 1:
                 self._my_id = payload.get("profile", {}).get("id")
                 log.info("Authorized! my_id=%s", self._my_id)
@@ -277,27 +259,20 @@ class MaxClient:
 
                 if self._on_ready_cb:
                     await self._on_ready_cb(payload)
-
             elif op == OpCode.DISPATCH:
                 self._dispatch_counter += 1
                 if self.debug and self._dispatch_counter <= 20:
-                    self._dump_json(
-                        f"dispatch_{self._dispatch_counter:04d}.json", payload
-                    )
+                    self._dump_json(f"dispatch_{self._dispatch_counter:04d}.json", payload)
 
                 if self._on_message_cb:
                     msg = self._parse_message(payload)
                     if msg is not None and ((not self.chat_ids) or (msg.chat_id in self.chat_ids)):
                         task = asyncio.create_task(self._on_message_cb(msg))
                         task.add_done_callback(_log_task_exception)
-
             elif op in (OpCode.HEARTBEAT_PING,):
                 log.debug("Heartbeat op=%s", op)
-
             elif cmd not in (1, 3):
                 log.info("<<< EVENT op=%-4s cmd=%-3s | %s", op, cmd, payload_preview[:500])
-
-    # ── WebSocket RPC: fetch contacts ──────────────────────────────
 
     async def fetch_contacts(self, contact_ids: list[int]) -> dict:
         """Fetch contact info via WS opcode 32. Returns raw response payload."""
@@ -306,24 +281,120 @@ class MaxClient:
         resp = await self.cmd(OpCode.CONTACT_GET, {"contactIds": contact_ids})
         if self.debug:
             self._dump_json("contacts_response.json", resp)
-        log.info("fetch_contacts(%s) → keys: %s", contact_ids, list(resp.keys()))
+        log.info("fetch_contacts(%s) -> keys: %s", contact_ids, list(resp.keys()))
         return resp
 
-    async def send_message(self, chat_id, text: str, elements=None) -> dict:
-        """Send a text message to a Max chat. Returns the server response."""
+    async def send_message(self, chat_id, text: str, elements=None, attaches=None) -> dict:
+        """Send a message to a Max chat."""
         if elements is None:
             elements = []
+        if attaches is None:
+            attaches = []
         cid = int(time.time() * 1000) * 1000 + random.randint(0, 999)
+        message = {"text": text, "cid": cid, "elements": elements}
+        if attaches:
+            message["attaches"] = attaches
         resp = await self.cmd(
             OpCode.SEND_MESSAGE,
             {
                 "chatId": chat_id,
-                "message": {"text": text, "cid": cid, "elements": elements},
+                "message": message,
                 "notify": True,
             },
         )
-        log.info("send_message(chat=%s) → %s", chat_id, "OK" if resp else "FAIL")
+        log.info("send_message(chat=%s) -> %s", chat_id, "OK" if resp else "FAIL")
         return resp
+
+    async def send_photo(
+        self,
+        chat_id,
+        data: bytes,
+        caption: str = "",
+        elements=None,
+        filename: str = "photo.jpg",
+    ) -> dict:
+        """Upload a photo and send it to a Max chat."""
+        if not data:
+            log.warning("send_photo(chat=%s) skipped: empty payload", chat_id)
+            return {}
+
+        attach = await self.upload_photo(chat_id, data, filename=filename)
+        if not attach:
+            return {}
+        return await self.send_message(chat_id, caption, elements, attaches=[attach])
+
+    async def upload_photo(self, chat_id, data: bytes, filename: str = "photo.jpg") -> dict:
+        """Upload photo bytes to Max and return attach payload for send_message."""
+        upload_info = await self.cmd(OpCode.PHOTO_UPLOAD_URL, {"count": 1})
+        upload_url = upload_info.get("url")
+        if not upload_url:
+            log.warning("Photo upload URL missing for chat=%s: %s", chat_id, upload_info)
+            return {}
+
+        init_payload = await self.cmd(
+            OpCode.UPLOAD_ATTACH,
+            {
+                "chatId": chat_id,
+                "type": "PHOTO",
+            },
+        )
+        if init_payload == {}:
+            log.warning("Photo upload init failed for chat=%s", chat_id)
+            return {}
+
+        response_payload = await self._upload_bytes(
+            upload_url,
+            data,
+            filename=filename,
+            content_type="image/jpeg",
+        )
+        if not response_payload:
+            return {}
+
+        photos = response_payload.get("photos") or {}
+        first_photo = next(iter(photos.values()), None)
+        if not isinstance(first_photo, dict) or not first_photo.get("token"):
+            log.warning("Photo upload token missing for chat=%s: %s", chat_id, response_payload)
+            return {}
+
+        return {
+            "_type": "PHOTO",
+            "photoToken": first_photo["token"],
+        }
+
+    async def _upload_bytes(
+        self,
+        url: str,
+        data: bytes,
+        *,
+        filename: str,
+        content_type: str,
+    ) -> dict:
+        session = getattr(self, "_session", None)
+        close_after = False
+        if session is None or session.closed:
+            session = aiohttp.ClientSession(headers=_BROWSER_HEADERS)
+            close_after = True
+
+        form = aiohttp.FormData()
+        form.add_field("file", data, filename=filename, content_type=content_type)
+        try:
+            async with session.post(
+                url,
+                headers=_HTTP_HEADERS,
+                data=form,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json(content_type=None)
+                body = await resp.text()
+                log.warning("Upload failed %s - HTTP %d: %s", url[:120], resp.status, body[:500])
+        except Exception:
+            log.exception("Upload error: %s", url[:120])
+        finally:
+            if close_after:
+                await session.close()
+        return {}
 
     async def download_file(self, url: str) -> bytes | None:
         """Download a file by URL, returning raw bytes or None on failure."""
@@ -334,22 +405,21 @@ class MaxClient:
             close_after = True
         try:
             async with session.get(
-                url, headers=_HTTP_HEADERS,
+                url,
+                headers=_HTTP_HEADERS,
                 timeout=aiohttp.ClientTimeout(total=120),
             ) as resp:
                 if resp.status == 200:
                     data = await resp.read()
                     log.info("Downloaded %s (%d bytes)", url[:120], len(data))
                     return data
-                log.warning("Download failed %s — HTTP %d", url[:120], resp.status)
+                log.warning("Download failed %s - HTTP %d", url[:120], resp.status)
         except Exception:
             log.exception("Download error: %s", url[:120])
         finally:
             if close_after:
                 await session.close()
         return None
-
-    # ── message parsing ────────────────────────────────────────────
 
     def _parse_message(self, payload: dict) -> MaxMessage | None:
         msg_body = payload.get("message")
@@ -371,8 +441,6 @@ class MaxClient:
             msg.is_self = True
 
         return msg
-
-    # ── debug helpers ──────────────────────────────────────────────
 
     @staticmethod
     def _dump_json(filename: str, data: dict) -> None:

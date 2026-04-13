@@ -1,6 +1,7 @@
 """Tests for app/max_client.py — OpCode enum and _parse_message."""
 
 import pytest
+from unittest.mock import AsyncMock
 from app.max_client import MaxClient, MaxMessage, OpCode
 
 
@@ -275,3 +276,33 @@ class TestMaxClientInit:
 
         result = c.on_disconnect(my_handler)
         assert result is my_handler
+
+
+class TestSendHelpers:
+    @pytest.mark.asyncio
+    async def test_send_message_passes_attaches_when_present(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client.cmd = AsyncMock(return_value={"ok": True})
+
+        await client.send_message(42, "hello", [{"type": "STRONG"}], attaches=[{"_type": "PHOTO"}])
+
+        payload = client.cmd.await_args.args[1]
+        assert payload["chatId"] == 42
+        assert payload["message"]["text"] == "hello"
+        assert payload["message"]["attaches"] == [{"_type": "PHOTO"}]
+
+    @pytest.mark.asyncio
+    async def test_send_photo_uploads_and_sends_attach(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client.upload_photo = AsyncMock(return_value={"_type": "PHOTO", "photoToken": "abc"})
+        client.send_message = AsyncMock(return_value={"ok": True})
+
+        await client.send_photo(42, b"image-bytes", caption="hello", elements=[{"type": "STRONG"}], filename="pic.jpg")
+
+        client.upload_photo.assert_awaited_once_with(42, b"image-bytes", filename="pic.jpg")
+        client.send_message.assert_awaited_once_with(
+            42,
+            "hello",
+            [{"type": "STRONG"}],
+            attaches=[{"_type": "PHOTO", "photoToken": "abc"}],
+        )

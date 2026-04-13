@@ -76,11 +76,21 @@ async def _relay_command_loop(relay_client: RelayClient, max_client) -> None:
             command = await relay_client.pull_command(timeout_seconds=30)
             if command is None:
                 continue
-            response = await max_client.send_message(
-                _parse_max_chat_id(command.max_chat_id),
-                command.text,
-                command.elements,
-            )
+            max_chat_id = _parse_max_chat_id(command.max_chat_id)
+            if command.kind == "photo":
+                response = await max_client.send_photo(
+                    max_chat_id,
+                    command.attachment or b"",
+                    caption=command.text,
+                    elements=command.elements,
+                    filename=command.filename or "photo.jpg",
+                )
+            else:
+                response = await max_client.send_message(
+                    max_chat_id,
+                    command.text,
+                    command.elements,
+                )
             if response:
                 await relay_client.ack_command(command.id)
             else:

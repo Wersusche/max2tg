@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -63,23 +64,36 @@ class MaxCommand:
     id: int
     max_chat_id: str
     text: str
+    kind: str = "text"
     elements: list[dict[str, Any]] = field(default_factory=list)
+    filename: str | None = None
+    attachment: bytes | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "id": self.id,
             "max_chat_id": self.max_chat_id,
+            "kind": self.kind,
             "text": self.text,
             "elements": self.elements,
         }
+        if self.filename is not None:
+            data["filename"] = self.filename
+        if self.attachment is not None:
+            data["attachment_b64"] = base64.b64encode(self.attachment).decode("ascii")
+        return data
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "MaxCommand":
+        attachment_b64 = payload.get("attachment_b64")
         return cls(
             id=int(payload["id"]),
             max_chat_id=str(payload["max_chat_id"]),
+            kind=str(payload.get("kind") or "text"),
             text=str(payload["text"]),
             elements=list(payload.get("elements") or []),
+            filename=payload.get("filename"),
+            attachment=base64.b64decode(attachment_b64) if attachment_b64 else None,
         )
 
 

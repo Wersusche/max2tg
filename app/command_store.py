@@ -40,13 +40,32 @@ class CommandStore:
                 CREATE TABLE IF NOT EXISTS max_commands (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     max_chat_id TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'text',
                     text TEXT NOT NULL,
                     elements_json TEXT NOT NULL,
+                    filename TEXT NULL,
+                    attachment_blob BLOB NULL,
                     leased_at TEXT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+            existing_columns = {
+                str(row["name"])
+                for row in self._conn.execute("PRAGMA table_info(max_commands)").fetchall()
+            }
+            if "kind" not in existing_columns:
+                self._conn.execute(
+                    "ALTER TABLE max_commands ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'"
+                )
+            if "filename" not in existing_columns:
+                self._conn.execute(
+                    "ALTER TABLE max_commands ADD COLUMN filename TEXT NULL"
+                )
+            if "attachment_blob" not in existing_columns:
+                self._conn.execute(
+                    "ALTER TABLE max_commands ADD COLUMN attachment_blob BLOB NULL"
+                )
             self._conn.commit()
 
     def enqueue(self, max_chat_id: Any, text: str, elements: list[dict[str, Any]] | None = None) -> MaxCommand:
@@ -54,14 +73,53 @@ class CommandStore:
         with self._lock:
             cur = self._conn.execute(
                 """
-                INSERT INTO max_commands (max_chat_id, text, elements_json, leased_at)
-                VALUES (?, ?, ?, NULL)
+                INSERT INTO max_commands (
+                    max_chat_id, kind, text, elements_json, filename, attachment_blob, leased_at
+                )
+                VALUES (?, 'text', ?, ?, NULL, NULL, NULL)
                 """,
                 (str(max_chat_id), text, payload),
             )
             self._conn.commit()
             command_id = int(cur.lastrowid)
-        return MaxCommand(id=command_id, max_chat_id=str(max_chat_id), text=text, elements=list(elements or []))
+        return MaxCommand(
+            id=command_id,
+            max_chat_id=str(max_chat_id),
+            text=text,
+            kind="text",
+            elements=list(elements or []),
+        )
+
+    def enqueue_photo(
+        self,
+        max_chat_id: Any,
+        photo: bytes,
+        caption: str = "",
+        elements: list[dict[str, Any]] | None = None,
+        filename: str = "photo.jpg",
+    ) -> MaxCommand:
+        payload = json.dumps(elements or [], ensure_ascii=False)
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO max_commands (
+                    max_chat_id, kind, text, elements_json, filename, attachment_blob, leased_at
+                )
+                VALUES (?, 'photo', ?, ?, ?, ?, NULL)
+                """,
+                (str(max_chat_id), caption, payload, filename, sqlite3.Binary(photo)),
+            )
+            self._conn.commit()
+            command_id = int(cur.lastrowid)
+        return MaxCommand(
+            id=command_id,
+            max_chat_id=str(max_chat_id),
+            text=caption,
+            kind="photo",
+            elements=list(elements or []),
+            filename=filename,
+            attachment=bytes(photo),
+        )
 
     def lease_next(self, lease_timeout_seconds: int = 60) -> MaxCommand | None:
         expiry_expr = f"-{int(lease_timeout_seconds)} seconds"
@@ -77,7 +135,7 @@ class CommandStore:
             )
             row = self._conn.execute(
                 """
-                SELECT id, max_chat_id, text, elements_json
+                SELECT id, max_chat_id, kind, text, elements_json, filename, attachment_blob
                 FROM max_commands
                 WHERE leased_at IS NULL
                 ORDER BY id ASC
@@ -109,6 +167,9 @@ class CommandStore:
         return MaxCommand(
             id=int(row["id"]),
             max_chat_id=str(row["max_chat_id"]),
+            kind=str(row["kind"]),
             text=str(row["text"]),
             elements=list(json.loads(row["elements_json"])),
+            filename=row["filename"],
+            attachment=bytes(row["attachment_blob"]) if row["attachment_blob"] is not None else None,
         )

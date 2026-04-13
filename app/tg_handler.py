@@ -1,13 +1,9 @@
 import logging
+import os
 
 import telegram.constants
 from telegram import Update
-from telegram.ext import (
-    Application,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 from app.command_store import CommandStore
 from app.max_client import MaxClient
@@ -29,8 +25,7 @@ async def _on_reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     allowed_chat_id = context.bot_data.get(_ALLOWED_CHAT_ID_KEY)
     if allowed_chat_id is not None and (
-        update.effective_chat.id != allowed_chat_id
-        and update.effective_user.id != allowed_chat_id
+        update.effective_chat.id != allowed_chat_id and update.effective_user.id != allowed_chat_id
     ):
         await query.answer()
         return
@@ -83,16 +78,7 @@ async def _on_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     text = update.message.text
-    elements = []
-    if update.message.chat.type in [telegram.constants.ChatType.GROUP, telegram.constants.ChatType.SUPERGROUP]:
-        text = f"💬 {update.message.from_user.full_name}:\n{text}"
-        elements = [
-            {
-                "type": "STRONG",
-                "length": len(update.message.from_user.full_name) + 1,
-                "from": 2,
-            }
-        ]
+    text, elements = _decorate_outbound_text(update.message, text)
     try:
         if max_client:
             resp = await max_client.send_message(max_chat_id, text, elements)
@@ -125,6 +111,51 @@ def _message_text_or_caption(update: Update) -> str | None:
     return message.text or message.caption
 
 
+def _decorate_outbound_text(message, text: str | None, *, include_sender_when_empty: bool = False) -> tuple[str, list[dict]]:
+    text = text or ""
+    elements: list[dict] = []
+    if message.chat.type in [telegram.constants.ChatType.GROUP, telegram.constants.ChatType.SUPERGROUP]:
+        sender_name = message.from_user.full_name if message.from_user else "Telegram"
+        prefix = f"💬 {sender_name}:"
+        elements = [
+            {
+                "type": "STRONG",
+                "length": len(sender_name) + 1,
+                "from": 2,
+            }
+        ]
+        if text:
+            return f"{prefix}\n{text}", elements
+        if include_sender_when_empty:
+            return prefix, elements
+    return text, elements
+
+
+def _has_photo(message) -> bool:
+    return bool(getattr(message, "photo", None))
+
+
+def _guess_photo_filename(telegram_file) -> str:
+    file_path = getattr(telegram_file, "file_path", "") or ""
+    _, ext = os.path.splitext(file_path)
+    ext = ext.lower()
+    if ext not in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}:
+        ext = ".jpg"
+    if ext == ".jpeg":
+        ext = ".jpg"
+    return f"photo{ext}"
+
+
+async def _download_largest_photo(message) -> tuple[bytes, str] | None:
+    photos = list(getattr(message, "photo", None) or [])
+    if not photos:
+        return None
+
+    telegram_file = await photos[-1].get_file()
+    payload = await telegram_file.download_as_bytearray()
+    return bytes(payload), _guess_photo_filename(telegram_file)
+
+
 async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Forward Telegram forum topic messages to the mapped Max chat."""
     message = update.message
@@ -152,7 +183,7 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     mapping = topic_store.get_by_thread(int(allowed_chat_id), int(message_thread_id))
     if mapping is None:
-        if _message_text_or_caption(update):
+        if _message_text_or_caption(update) or _has_photo(message):
             await message.reply_text(
                 "⚠️ Не знаю, какому чату Max соответствует этот топик. "
                 "Дождитесь входящего сообщения из Max, чтобы бот создал тему."
@@ -166,25 +197,47 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     text = _message_text_or_caption(update)
-    if not text:
-        if getattr(message, "effective_attachment", None) is not None:
-            await message.reply_text("⚠️ Пока умею отправлять в Max только текст и подписи к медиа.")
-        return
-
-    elements = []
-    if message.chat.type in [telegram.constants.ChatType.GROUP, telegram.constants.ChatType.SUPERGROUP]:
-        sender_name = message.from_user.full_name if message.from_user else "Telegram"
-        text = f"💬 {sender_name}:\n{text}"
-        elements = [
-            {
-                "type": "STRONG",
-                "length": len(sender_name) + 1,
-                "from": 2,
-            }
-        ]
+    parsed_max_chat_id = _parse_max_chat_id(mapping.max_chat_id)
 
     try:
-        parsed_max_chat_id = _parse_max_chat_id(mapping.max_chat_id)
+        if _has_photo(message):
+            photo = await _download_largest_photo(message)
+            if photo is None:
+                await message.reply_text("⚠️ Не удалось скачать фото из Telegram.")
+                return
+            photo_bytes, filename = photo
+            caption, elements = _decorate_outbound_text(
+                message,
+                text,
+                include_sender_when_empty=True,
+            )
+            if max_client:
+                resp = await max_client.send_photo(
+                    parsed_max_chat_id,
+                    photo_bytes,
+                    caption=caption,
+                    elements=elements,
+                    filename=filename,
+                )
+            else:
+                command_store.enqueue_photo(
+                    parsed_max_chat_id,
+                    photo_bytes,
+                    caption=caption,
+                    elements=elements,
+                    filename=filename,
+                )
+                resp = {"queued": True}
+            if not resp:
+                await message.reply_text("⚠️ Не удалось отправить фото в Max.")
+            return
+
+        if not text:
+            if getattr(message, "effective_attachment", None) is not None:
+                await message.reply_text("⚠️ Пока умею отправлять в Max только текст и фото.")
+            return
+
+        text, elements = _decorate_outbound_text(message, text)
         if max_client:
             resp = await max_client.send_message(parsed_max_chat_id, text, elements)
         else:
