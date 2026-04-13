@@ -3,7 +3,17 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 APP_DIR=$(dirname "$SCRIPT_DIR")
+COMPOSE_FILE_PATH="$APP_DIR/docker-compose.yml"
 cd "$APP_DIR"
+
+require_project_file() {
+    file_path="$1"
+    if [ -f "$file_path" ]; then
+        return 0
+    fi
+    echo "Required deploy file is missing: $file_path" >&2
+    exit 1
+}
 
 have_passwordless_sudo() {
     command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1
@@ -203,28 +213,33 @@ ensure_compose() {
 
 run_compose_up() {
     if docker_accessible && docker compose version >/dev/null 2>&1; then
-        docker compose up -d --build
+        docker compose -f "$COMPOSE_FILE_PATH" up -d --build
         return 0
     fi
 
     if docker_accessible_via_sudo && sudo docker compose version >/dev/null 2>&1; then
-        sudo docker compose up -d --build
+        sudo docker compose -f "$COMPOSE_FILE_PATH" up -d --build
         return 0
     fi
 
     if docker_accessible && command -v docker-compose >/dev/null 2>&1 && docker-compose version >/dev/null 2>&1; then
-        docker-compose up -d --build
+        docker-compose -f "$COMPOSE_FILE_PATH" up -d --build
         return 0
     fi
 
     if docker_accessible_via_sudo && sudo docker-compose version >/dev/null 2>&1; then
-        sudo docker-compose up -d --build
+        sudo docker-compose -f "$COMPOSE_FILE_PATH" up -d --build
         return 0
     fi
 
     echo "Docker is installed, but the daemon is not accessible to the deploy user." >&2
     exit 1
 }
+
+require_project_file "$COMPOSE_FILE_PATH"
+require_project_file "$APP_DIR/Dockerfile"
+require_project_file "$APP_DIR/requirements.txt"
+require_project_file "$APP_DIR/app/main.py"
 
 ensure_docker
 ensure_docker_service
