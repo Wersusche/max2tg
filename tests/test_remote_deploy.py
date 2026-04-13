@@ -89,3 +89,21 @@ def test_build_archive_includes_required_deploy_files():
     assert "docker-compose.yml" in names
     assert "Dockerfile" in names
     assert "requirements.txt" in names
+
+
+def test_dockerignore_keeps_remote_deploy_files_in_image():
+    dockerignore_lines = {
+        line.strip()
+        for line in Path(".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    assert "docker-compose.yml" not in dockerignore_lines
+    assert "Dockerfile" not in dockerignore_lines
+
+
+def test_bootstrap_remote_script_keeps_download_errors_visible():
+    script_text = Path("scripts/bootstrap_remote.sh").read_text(encoding="utf-8")
+
+    assert "wget -q" not in script_text
+    assert "[bootstrap]" in script_text

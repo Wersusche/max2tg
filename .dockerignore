@@ -5,8 +5,6 @@
 .gitignore
 .idea/
 conftest.py
-docker-compose.yml
-Dockerfile
 pytest.ini
 README.md
 __pycache__
