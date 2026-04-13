@@ -89,6 +89,7 @@ class TestSettingsDataclass:
         assert settings.relay_bind_host == "127.0.0.1"
         assert settings.relay_bind_port == 8080
         assert settings.relay_tunnel_local_port == 18080
+        assert settings.foreign_app_dir == "/home/relay/max2tg"
 
 
 class TestLoadSettingsMaxBridge:
@@ -144,6 +145,10 @@ class TestLoadSettingsMaxBridge:
     def test_bridge_allows_custom_relay_port_for_tunnel(self):
         settings = _load_settings_with_env(_bridge_env(RELAY_BIND_PORT="19090"))
         assert settings.relay_bind_port == 19090
+
+    def test_bridge_uses_new_default_foreign_app_dir(self):
+        settings = _load_settings_with_env(_bridge_env(FOREIGN_APP_DIR=""))
+        assert settings.foreign_app_dir == "/home/relay/max2tg"
 
     def test_missing_required_bridge_var_raises(self):
         env = _bridge_env()

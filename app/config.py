@@ -32,7 +32,7 @@ class Settings:
     foreign_ssh_port: int = 22
     foreign_ssh_user: str | None = None
     foreign_ssh_private_key: str | None = None
-    foreign_app_dir: str = "/opt/max2tg-relay"
+    foreign_app_dir: str = "/home/relay/max2tg"
     remote_deploy_enabled: bool = True
     foreign_relay_env_b64: str | None = None
 
@@ -156,7 +156,7 @@ def load_settings() -> Settings:
         foreign_ssh_port=_env_int("FOREIGN_SSH_PORT", 22),
         foreign_ssh_user=env.get("FOREIGN_SSH_USER") or None,
         foreign_ssh_private_key=_normalize_ssh_private_key(env.get("FOREIGN_SSH_PRIVATE_KEY") or None),
-        foreign_app_dir=env.get("FOREIGN_APP_DIR") or "/opt/max2tg-relay",
+        foreign_app_dir=env.get("FOREIGN_APP_DIR") or "/home/relay/max2tg",
         remote_deploy_enabled=_env_flag("REMOTE_DEPLOY_ENABLED", default=True),
         foreign_relay_env_b64=env.get("FOREIGN_RELAY_ENV_B64") or None,
     )
