@@ -5,6 +5,8 @@ from html import escape
 from telegram.error import BadRequest
 
 from app.max_client import MaxClient, MaxMessage
+from app.relay_client import RelayClient
+from app.relay_models import RelayOperationBuilder
 from app.resolver import ContactResolver
 from app.tg_sender import TelegramSender, reply_keyboard
 from app.topic_router import TopicRouter
@@ -350,6 +352,7 @@ def _is_missing_topic_error(exc: BadRequest) -> bool:
 def create_max_client(
     max_token: str, max_device_id: str, sender: TelegramSender, max_chat_ids: str | None = None,
     debug: bool = False, reply_enabled: bool = False, topic_router: TopicRouter | None = None,
+    relay_client: RelayClient | None = None,
 ) -> MaxClient:
     client = MaxClient(token=max_token, device_id=max_device_id, debug=debug, chat_ids=max_chat_ids)
     resolver = ContactResolver(client=client)
@@ -419,8 +422,10 @@ def create_max_client(
         chat_label = escape(chat_name)
         header_text = _header(msg, sender_label, chat_label, is_dm)
         topic_name = sender_name if is_dm else chat_name
-        kb = reply_keyboard(msg.chat_id) if reply_enabled and topic_router is None else None
+        kb = reply_keyboard(msg.chat_id) if reply_enabled and topic_router is None and relay_client is None else None
         raise_topic_errors = topic_router is not None
+        operation_builder = RelayOperationBuilder() if relay_client is not None else None
+        dispatch_sender = operation_builder if operation_builder is not None else sender
 
         async def forward_to_telegram(message_thread_id: int | None) -> None:
             link = msg.link
@@ -432,14 +437,14 @@ def create_max_client(
                     link_type,
                     header_text,
                     client,
-                    sender,
+                    dispatch_sender,
                     resolver,
                     kb=kb,
                     message_thread_id=message_thread_id,
                     raise_bad_request=raise_topic_errors,
                 )
                 if msg.text:
-                    await sender.send(
+                    await dispatch_sender.send(
                         f"{header_text}\n{escape(msg.text)}",
                         reply_markup=kb,
                         message_thread_id=message_thread_id,
@@ -464,7 +469,7 @@ def create_max_client(
                     await _send_attach(
                         attach,
                         client,
-                        sender,
+                        dispatch_sender,
                         cap,
                         kb=kb,
                         message_thread_id=message_thread_id,
@@ -473,7 +478,7 @@ def create_max_client(
                     log.info("Forwarded attach _type=%s → TG", attach.get("_type"))
 
                 if msg.text and not text_sent:
-                    await sender.send(
+                    await dispatch_sender.send(
                         f"{header_text}\n{escape(msg.text)}",
                         reply_markup=kb,
                         message_thread_id=message_thread_id,
@@ -481,13 +486,23 @@ def create_max_client(
                     )
             else:
                 body = escape(msg.text) if msg.text else "<i>[нетекстовое сообщение]</i>"
-                await sender.send(
+                await dispatch_sender.send(
                     f"{header_text}\n{body}",
                     reply_markup=kb,
                     message_thread_id=message_thread_id,
                     raise_bad_request=raise_topic_errors,
                 )
                 log.info("Forwarded text → TG")
+
+        if relay_client is not None:
+            await forward_to_telegram(None)
+            if operation_builder is None or operation_builder.is_empty:
+                return
+            await relay_client.send_batch(
+                operation_builder.build_batch(msg.chat_id, topic_name),
+                operation_builder.attachments,
+            )
+            return
 
         if topic_router is None:
             await forward_to_telegram(None)

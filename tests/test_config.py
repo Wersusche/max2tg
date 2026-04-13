@@ -1,192 +1,166 @@
-"""Tests for app/config.py — load_settings."""
+"""Tests for app/config.py."""
 
+import base64
 import os
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from app.config import Settings, load_settings
+import pytest
+
+from app.config import (
+    APP_ROLE_MAX_BRIDGE,
+    APP_ROLE_TG_RELAY,
+    Settings,
+    load_settings,
+)
 
 
 def _load_settings_with_env(env: dict) -> Settings:
-    """Call load_settings with a fully isolated environment, suppressing .env file loading."""
     with patch("app.config.load_dotenv"), patch.dict(os.environ, env, clear=True):
         return load_settings()
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_VALID_ENV = {
-    "MAX_TOKEN": "token123",
-    "MAX_DEVICE_ID": "device-abc",
-    "TG_BOT_TOKEN": "123456:AAABBBCCC",
-    "TG_CHAT_ID": "-100123456",
-}
+def _b64_env(text: str) -> str:
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-def _env(**overrides):
-    """Return a copy of the valid env dict with any overrides applied."""
-    e = dict(_VALID_ENV)
-    e.update(overrides)
-    return e
+def _bridge_env(**overrides) -> dict[str, str]:
+    env = {
+        "APP_ROLE": APP_ROLE_MAX_BRIDGE,
+        "RELAY_SHARED_SECRET": "secret-123",
+        "MAX_TOKEN": "token123",
+        "MAX_DEVICE_ID": "device-abc",
+        "FOREIGN_SSH_HOST": "relay.example.com",
+        "FOREIGN_SSH_USER": "deploy",
+        "FOREIGN_SSH_PRIVATE_KEY": "-----BEGIN KEY-----\nabc\n-----END KEY-----",
+        "FOREIGN_RELAY_ENV_B64": _b64_env(
+            "\n".join(
+                [
+                    "APP_ROLE=tg-relay",
+                    "RELAY_SHARED_SECRET=secret-123",
+                    "TG_BOT_TOKEN=123456:AAABBBCCC",
+                    "TG_CHAT_ID=-100123456",
+                ]
+            )
+        ),
+    }
+    env.update(overrides)
+    return env
 
 
-# ---------------------------------------------------------------------------
-# Settings dataclass
-# ---------------------------------------------------------------------------
+def _relay_env(**overrides) -> dict[str, str]:
+    env = {
+        "APP_ROLE": APP_ROLE_TG_RELAY,
+        "RELAY_SHARED_SECRET": "secret-123",
+        "TG_BOT_TOKEN": "123456:AAABBBCCC",
+        "TG_CHAT_ID": "-100123456",
+    }
+    env.update(overrides)
+    return env
+
 
 class TestSettingsDataclass:
     def test_frozen(self):
-        s = Settings(
-            max_token="t", max_device_id="d", tg_bot_token="b", tg_chat_id="c"
-        )
+        settings = Settings(app_role=APP_ROLE_MAX_BRIDGE, relay_shared_secret="secret")
         with pytest.raises((AttributeError, TypeError)):
-            s.max_token = "changed"  # type: ignore[misc]
+            settings.app_role = APP_ROLE_TG_RELAY  # type: ignore[misc]
 
     def test_defaults(self):
-        s = Settings(
-            max_token="t", max_device_id="d", tg_bot_token="b", tg_chat_id="c"
+        settings = Settings(app_role=APP_ROLE_MAX_BRIDGE, relay_shared_secret="secret")
+        assert settings.debug is False
+        assert settings.reply_enabled is False
+        assert settings.max_chat_ids is None
+        assert settings.topic_db_path == "data/topics.sqlite3"
+        assert settings.command_db_path == "data/commands.sqlite3"
+        assert settings.relay_bind_host == "127.0.0.1"
+        assert settings.relay_bind_port == 8080
+        assert settings.relay_tunnel_local_port == 18080
+
+
+class TestLoadSettingsMaxBridge:
+    def test_valid_env(self):
+        settings = _load_settings_with_env(_bridge_env(DEBUG="true", REPLY_ENABLED="yes", MAX_CHAT_IDS="1,2"))
+        assert settings.app_role == APP_ROLE_MAX_BRIDGE
+        assert settings.max_token == "token123"
+        assert settings.max_device_id == "device-abc"
+        assert settings.max_chat_ids == "1,2"
+        assert settings.debug is True
+        assert settings.reply_enabled is True
+        assert settings.foreign_ssh_host == "relay.example.com"
+        assert settings.foreign_relay_env_text.startswith("APP_ROLE=tg-relay")
+
+    def test_remote_deploy_env_blob_optional_when_deploy_disabled(self):
+        settings = _load_settings_with_env(
+            _bridge_env(REMOTE_DEPLOY_ENABLED="false", FOREIGN_RELAY_ENV_B64="")
         )
-        assert s.debug is False
-        assert s.reply_enabled is False
-        assert s.max_chat_ids is None
-        assert s.topic_db_path == "data/topics.sqlite3"
+        assert settings.remote_deploy_enabled is False
+        assert settings.foreign_relay_env_b64 is None
 
+    def test_default_app_role_is_max_bridge(self):
+        env = _bridge_env()
+        env.pop("APP_ROLE")
+        settings = _load_settings_with_env(env)
+        assert settings.app_role == APP_ROLE_MAX_BRIDGE
 
-# ---------------------------------------------------------------------------
-# load_settings — valid env
-# ---------------------------------------------------------------------------
-
-class TestLoadSettingsValid:
-    def test_required_fields_populated(self):
-        s = _load_settings_with_env(_env())
-        assert s.max_token == "token123"
-        assert s.max_device_id == "device-abc"
-        assert s.tg_bot_token == "123456:AAABBBCCC"
-        assert s.tg_chat_id == "-100123456"
-
-    def test_debug_default_false(self):
-        s = _load_settings_with_env(_env())
-        assert s.debug is False
-
-    def test_debug_true_via_1(self):
-        s = _load_settings_with_env(_env(DEBUG="1"))
-        assert s.debug is True
-
-    def test_debug_true_via_true(self):
-        s = _load_settings_with_env(_env(DEBUG="true"))
-        assert s.debug is True
-
-    def test_debug_true_via_yes(self):
-        s = _load_settings_with_env(_env(DEBUG="yes"))
-        assert s.debug is True
-
-    def test_debug_true_mixed_case(self):
-        s = _load_settings_with_env(_env(DEBUG="True"))
-        assert s.debug is True
-
-    def test_debug_false_via_empty_string(self):
-        s = _load_settings_with_env(_env(DEBUG=""))
-        assert s.debug is False
-
-    def test_debug_false_via_0(self):
-        s = _load_settings_with_env(_env(DEBUG="0"))
-        assert s.debug is False
-
-    def test_debug_false_via_no(self):
-        s = _load_settings_with_env(_env(DEBUG="no"))
-        assert s.debug is False
-
-    def test_reply_enabled_default_false(self):
-        s = _load_settings_with_env(_env())
-        assert s.reply_enabled is False
-
-    def test_reply_enabled_true_via_1(self):
-        s = _load_settings_with_env(_env(REPLY_ENABLED="1"))
-        assert s.reply_enabled is True
-
-    def test_reply_enabled_true_via_yes(self):
-        s = _load_settings_with_env(_env(REPLY_ENABLED="yes"))
-        assert s.reply_enabled is True
-
-    def test_reply_enabled_false_via_false(self):
-        s = _load_settings_with_env(_env(REPLY_ENABLED="false"))
-        assert s.reply_enabled is False
-
-    def test_returns_settings_instance(self):
-        s = _load_settings_with_env(_env())
-        assert isinstance(s, Settings)
-
-    def test_max_chat_ids_none_when_not_set(self):
-        s = _load_settings_with_env(_env())
-        assert s.max_chat_ids is None
-
-    def test_max_chat_ids_populated_when_set(self):
-        s = _load_settings_with_env(_env(MAX_CHAT_IDS="-123,-456"))
-        assert s.max_chat_ids == "-123,-456"
-
-    def test_max_chat_ids_none_when_empty_string(self):
-        s = _load_settings_with_env(_env(MAX_CHAT_IDS=""))
-        assert s.max_chat_ids is None
-
-    def test_topic_db_path_default(self):
-        s = _load_settings_with_env(_env())
-        assert s.topic_db_path == "data/topics.sqlite3"
-
-    def test_topic_db_path_can_be_overridden(self):
-        s = _load_settings_with_env(_env(TOPIC_DB_PATH="/tmp/max2tg/topics.sqlite3"))
-        assert s.topic_db_path == "/tmp/max2tg/topics.sqlite3"
-
-
-# ---------------------------------------------------------------------------
-# load_settings — missing required variables
-# ---------------------------------------------------------------------------
-
-class TestLoadSettingsMissing:
-    def _env_without(self, *keys):
-        e = dict(_VALID_ENV)
-        for k in keys:
-            e.pop(k, None)
-        return e
-
-    def test_missing_max_token_raises(self):
+    def test_missing_required_bridge_var_raises(self):
+        env = _bridge_env()
+        env.pop("MAX_TOKEN")
         with pytest.raises(SystemExit) as exc:
-            _load_settings_with_env(self._env_without("MAX_TOKEN"))
+            _load_settings_with_env(env)
         assert "MAX_TOKEN" in str(exc.value)
 
-    def test_missing_max_device_id_raises(self):
+    def test_missing_shared_secret_raises(self):
+        env = _bridge_env()
+        env.pop("RELAY_SHARED_SECRET")
         with pytest.raises(SystemExit) as exc:
-            _load_settings_with_env(self._env_without("MAX_DEVICE_ID"))
-        assert "MAX_DEVICE_ID" in str(exc.value)
+            _load_settings_with_env(env)
+        assert "RELAY_SHARED_SECRET" in str(exc.value)
 
-    def test_missing_tg_bot_token_raises(self):
+    def test_rejects_tg_specific_vars(self):
         with pytest.raises(SystemExit) as exc:
-            _load_settings_with_env(self._env_without("TG_BOT_TOKEN"))
-        assert "TG_BOT_TOKEN" in str(exc.value)
+            _load_settings_with_env(_bridge_env(TG_BOT_TOKEN="123", TG_CHAT_ID="-1001"))
+        msg = str(exc.value)
+        assert "TG_BOT_TOKEN" in msg
+        assert "TG_CHAT_ID" in msg
 
-    def test_missing_tg_chat_id_raises(self):
+    def test_invalid_remote_env_base64_raises(self):
         with pytest.raises(SystemExit) as exc:
-            _load_settings_with_env(self._env_without("TG_CHAT_ID"))
+            _load_settings_with_env(_bridge_env(FOREIGN_RELAY_ENV_B64="%%%"))
+        assert "FOREIGN_RELAY_ENV_B64" in str(exc.value)
+
+
+class TestLoadSettingsRelay:
+    def test_valid_env(self):
+        settings = _load_settings_with_env(
+            _relay_env(DEBUG="1", REPLY_ENABLED="true", COMMAND_DB_PATH="/tmp/commands.sqlite3")
+        )
+        assert settings.app_role == APP_ROLE_TG_RELAY
+        assert settings.tg_bot_token == "123456:AAABBBCCC"
+        assert settings.tg_chat_id == "-100123456"
+        assert settings.command_db_path == "/tmp/commands.sqlite3"
+        assert settings.debug is True
+        assert settings.reply_enabled is True
+
+    def test_invalid_tg_chat_id_raises(self):
+        with pytest.raises(SystemExit) as exc:
+            _load_settings_with_env(_relay_env(TG_CHAT_ID="not-an-int"))
         assert "TG_CHAT_ID" in str(exc.value)
 
-    def test_missing_multiple_vars_reports_all(self):
-        missing = ["MAX_TOKEN", "TG_BOT_TOKEN"]
+    def test_rejects_max_specific_vars(self):
         with pytest.raises(SystemExit) as exc:
-            _load_settings_with_env(self._env_without(*missing))
+            _load_settings_with_env(_relay_env(MAX_TOKEN="tok", MAX_DEVICE_ID="dev"))
         msg = str(exc.value)
-        for var in missing:
-            assert var in msg
+        assert "MAX_TOKEN" in msg
+        assert "MAX_DEVICE_ID" in msg
 
-    def test_completely_empty_env_reports_all_required(self):
-        required = ["MAX_TOKEN", "MAX_DEVICE_ID", "TG_BOT_TOKEN", "TG_CHAT_ID"]
+    def test_missing_required_relay_var_raises(self):
+        env = _relay_env()
+        env.pop("TG_BOT_TOKEN")
         with pytest.raises(SystemExit) as exc:
-            _load_settings_with_env({})
-        msg = str(exc.value)
-        for var in required:
-            assert var in msg
+            _load_settings_with_env(env)
+        assert "TG_BOT_TOKEN" in str(exc.value)
 
-    def test_empty_string_value_treated_as_missing(self):
-        with pytest.raises(SystemExit) as exc:
-            _load_settings_with_env(_env(MAX_TOKEN=""))
-        assert "MAX_TOKEN" in str(exc.value)
+
+def test_invalid_app_role_raises():
+    with pytest.raises(SystemExit) as exc:
+        _load_settings_with_env({"APP_ROLE": "unknown", "RELAY_SHARED_SECRET": "secret"})
+    assert "APP_ROLE" in str(exc.value)

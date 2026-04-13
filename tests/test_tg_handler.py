@@ -3,6 +3,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from app.command_store import CommandStore
 from app.tg_handler import (
     PENDING_REPLY_KEY,
     PENDING_REPLY_LABEL_KEY,
@@ -412,3 +413,46 @@ class TestOnTopicMessage:
         max_client.send_message.assert_not_called()
         update.message.reply_text.assert_not_called()
         store.close()
+
+
+class TestRelayQueueMode:
+    @pytest.mark.asyncio
+    async def test_topic_message_enqueues_command_when_command_store_present(self, tmp_path):
+        topic_store = TopicStore(str(tmp_path / "topics.sqlite3"))
+        command_store = CommandStore(str(tmp_path / "commands.sqlite3"))
+        topic_store.upsert_mapping(-100, 42, 10, "Alice")
+        ctx = _make_context(
+            bot_data={
+                "allowed_chat_id": -100,
+                "topic_store": topic_store,
+                "command_store": command_store,
+            }
+        )
+        update = _make_topic_update(text="Hello", user_name="Bob")
+
+        await _on_topic_message(update, ctx)
+
+        queued = command_store.lease_next()
+        assert queued is not None
+        assert queued.max_chat_id == "42"
+        assert "Bob" in queued.text
+        assert "Hello" in queued.text
+        topic_store.close()
+        command_store.close()
+
+    @pytest.mark.asyncio
+    async def test_text_reply_enqueues_command_when_command_store_present(self, tmp_path):
+        command_store = CommandStore(str(tmp_path / "commands.sqlite3"))
+        update = _make_message_update("Hello", chat_type="private")
+        ctx = _make_context(
+            user_data={PENDING_REPLY_KEY: 42, PENDING_REPLY_LABEL_KEY: "Chat"},
+            bot_data={"command_store": command_store},
+        )
+
+        await _on_text_reply(update, ctx)
+
+        queued = command_store.lease_next()
+        assert queued is not None
+        assert queued.max_chat_id == "42"
+        assert queued.text == "Hello"
+        command_store.close()

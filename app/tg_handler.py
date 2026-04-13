@@ -1,5 +1,6 @@
 import logging
 
+import telegram.constants
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -7,8 +8,8 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-import telegram.constants
 
+from app.command_store import CommandStore
 from app.max_client import MaxClient
 from app.topic_store import TopicStore
 
@@ -19,6 +20,7 @@ PENDING_REPLY_LABEL_KEY = "pending_reply_label"
 
 _ALLOWED_CHAT_ID_KEY = "allowed_chat_id"
 _TOPIC_STORE_KEY = "topic_store"
+_COMMAND_STORE_KEY = "command_store"
 
 
 async def _on_reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -39,7 +41,7 @@ async def _on_reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not data.startswith("reply:"):
         return
 
-    chat_id_str = data[len("reply:"):]
+    chat_id_str = data[len("reply:") :]
     try:
         max_chat_id = int(chat_id_str)
     except ValueError:
@@ -75,7 +77,8 @@ async def _on_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     max_client: MaxClient | None = context.bot_data.get("max_client")
-    if not max_client:
+    command_store: CommandStore | None = context.bot_data.get(_COMMAND_STORE_KEY)
+    if not max_client and not command_store:
         await update.message.reply_text("⚠️ Max клиент не подключён.")
         return
 
@@ -86,14 +89,21 @@ async def _on_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         elements = [
             {
                 "type": "STRONG",
-                "length": len(update.message.from_user.full_name)+1,
-                "from": 2
+                "length": len(update.message.from_user.full_name) + 1,
+                "from": 2,
             }
         ]
     try:
-        resp = await max_client.send_message(max_chat_id, text, elements)
+        if max_client:
+            resp = await max_client.send_message(max_chat_id, text, elements)
+        else:
+            command_store.enqueue(max_chat_id, text, elements)
+            resp = {"queued": True}
         if resp:
-            await update.message.reply_text(f"✅ Отправлено → <b>{label or max_chat_id}</b>", parse_mode="HTML")
+            await update.message.reply_text(
+                f"✅ Отправлено → <b>{label or max_chat_id}</b>",
+                parse_mode="HTML",
+            )
         else:
             await update.message.reply_text("⚠️ Не удалось отправить сообщение в Max.")
     except Exception:
@@ -150,7 +160,8 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     max_client: MaxClient | None = context.bot_data.get("max_client")
-    if not max_client:
+    command_store: CommandStore | None = context.bot_data.get(_COMMAND_STORE_KEY)
+    if not max_client and not command_store:
         await message.reply_text("⚠️ Max клиент не подключён.")
         return
 
@@ -173,7 +184,12 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         ]
 
     try:
-        resp = await max_client.send_message(_parse_max_chat_id(mapping.max_chat_id), text, elements)
+        parsed_max_chat_id = _parse_max_chat_id(mapping.max_chat_id)
+        if max_client:
+            resp = await max_client.send_message(parsed_max_chat_id, text, elements)
+        else:
+            command_store.enqueue(parsed_max_chat_id, text, elements)
+            resp = {"queued": True}
         if not resp:
             await message.reply_text("⚠️ Не удалось отправить сообщение в Max.")
     except Exception:
@@ -183,18 +199,21 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 def build_tg_app(
     token: str,
-    max_client: MaxClient,
     allowed_chat_id: str,
     topic_store: TopicStore,
+    *,
+    command_store: CommandStore | None = None,
+    max_client: MaxClient | None = None,
 ) -> Application:
     """Build and configure the Telegram Application with handlers."""
     app = Application.builder().token(token).build()
-    app.bot_data["max_client"] = max_client
+    if max_client is not None:
+        app.bot_data["max_client"] = max_client
+    if command_store is not None:
+        app.bot_data[_COMMAND_STORE_KEY] = command_store
     app.bot_data[_ALLOWED_CHAT_ID_KEY] = int(allowed_chat_id)
     app.bot_data[_TOPIC_STORE_KEY] = topic_store
 
     chat_filter = filters.Chat(chat_id=int(allowed_chat_id))
-
     app.add_handler(MessageHandler(chat_filter & ~filters.COMMAND, _on_topic_message))
-
     return app

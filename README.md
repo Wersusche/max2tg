@@ -1,509 +1,189 @@
 # max2tg
 
-Пересылка сообщений из мессенджера **Max** (max.ru) в **Telegram** в реальном времени — с возможностью отвечать обратно.
+Двухузловой мост между **Max** и **Telegram**:
 
-> **Отказ от ответсвенности:** 
-1. Этот проект является независимым, неофициальным и не связан с разработчиками мессенджера Max (или любой другой сторонней организацией). Авторы Max не одобряют, не поддерживают и не несут ответственности за этот код.
+- `max-bridge` на российском сервере держит соединение с Max, форматирует сообщения и скачивает вложения.
+- `tg-relay` на зарубежном сервере держит Telegram Bot API, создает темы и принимает ответы из Telegram обратно в очередь для Max.
 
-2. Программа предоставляется "как есть" (AS IS), без каких-либо гарантий — явных или подразумеваемых, включая, но не ограничиваясь гарантиями товарности, пригодности для конкретной цели или отсутствия ошибок.
-
-3. Авторы не несут ответственности за любые прямые, косвенные, случайные, специальные или последствия ущерба, возникшие в связи с использованием этого ПО, включая потерю данных, доходов или другие убытки, даже если автор был уведомлён о возможности такого ущерба.
-
-4. Использование этого ПО осуществляется исключительно на ваш страх и риск. Рекомендуется самостоятельно проверить код на безопасность и соответствие местному законодательству перед использованием.
-
-5. Этот проект создан в образовательных и исследовательских целях. Авторы не поощряют и не рекомендуют использование для обхода требований государственных органов или нарушения пользовательских соглашений третьих сторон.
-
-
-> [English version below](#english)
-
----
-
-## Возможности
-
-- Пересылка текстовых сообщений, фото, видео, файлов, аудио, стикеров, контактов, геолокаций и ссылок
-- Поддержка пересланных и цитируемых сообщений (forward / reply)
-- Разное оформление для личных и групповых чатов
-- Отдельная Telegram-тема для каждого чата Max и ответы из этих тем обратно в Max
-- Уведомления о статусе соединения с Max — при запуске, потере связи и восстановлении (с троттлингом, чтобы не спамить)
-- Работает как userbot — подключается к вашему аккаунту Max через WebSocket
-- Docker-ready: разворачивается одной командой
-
-## Требования
-
-- Python 3.12+
-- Аккаунт в Max (web.max.ru)
-- Telegram-бот (создаётся через [@BotFather](https://t.me/BotFather))
-
-## Получение credentials
-
-### Max: токен и device ID
-
-1. Откройте [web.max.ru](https://web.max.ru) в Chrome/Firefox и войдите в свой аккаунт
-2. Откройте DevTools: `F12` (или `Cmd+Option+I` на macOS)
-3. Перейдите во вкладку **Application** (Chrome) или **Storage** (Firefox)
-4. В левой панели: **Local Storage → https://web.max.ru**
-5. Найдите и скопируйте значения:
-   - `__oneme_auth` → это ваш `MAX_TOKEN`
-   - `__oneme_device_id` → это ваш `MAX_DEVICE_ID`
-
-> **Важно:** не делитесь этими значениями — они дают полный доступ к вашему аккаунту Max.
-
-### Telegram: токен бота и chat ID
-
-1. Напишите [@BotFather](https://t.me/BotFather) в Telegram → `/newbot` → следуйте инструкциям
-2. Скопируйте полученный токен → это ваш `TG_BOT_TOKEN`
-3. Создайте супергруппу Telegram, включите в ней темы, добавьте бота администратором с правом управлять темами
-4. Узнайте ID этой супергруппы — это `TG_CHAT_ID`
-
-## Настройка
-
-Скопируйте пример конфигурации и заполните значения:
-
-```bash
-cp .env.example .env
-```
-
-Содержимое `.env`:
-
-| Переменная      | Обязательная | Описание                                       |
-|-----------------|--------------|------------------------------------------------|
-| `MAX_TOKEN`     | да           | Токен авторизации Max                          |
-| `MAX_DEVICE_ID` | да           | ID устройства Max                              |
-| `MAX_CHAT_IDS`  | нет          | список ID чатов Max, разделенных запятой       |
-| `TG_BOT_TOKEN`  | да           | Токен Telegram-бота                            |
-| `TG_CHAT_ID`    | да           | ID Telegram-супергруппы с включёнными темами   |
-| `TOPIC_DB_PATH` | нет          | SQLite-файл соответствий Max↔Telegram-топики   |
-| `DEBUG`         | нет          | `true` — подробные логи + дамп JSON в `debug/` |
-| `REPLY_ENABLED` | нет          | `true` — разрешить ответы из Telegram-тем в Max |
-| `LOG_DIR`       | нет          | Путь к директории логов (по умолчанию `logs`)  |
-
-## Запуск
-
-### Docker (рекомендуется для сервера)
-
-```bash
-git clone git@github.com:Aist/max2tg.git max2tg
-cd max2tg
-cp .env.example .env
-# отредактируйте .env
-
-docker-compose up -d
-```
-
-Логи Docker (stdout):
-
-```bash
-docker-compose logs -f
-```
-
-Логи на диске доступны на хосте в директории `./logs/` — файл `max2tg.log` с ротацией по 10 МБ (хранится 5 файлов). Соответствия Max↔Telegram-топики хранятся в `./data/topics.sqlite3`:
-
-```bash
-tail -f logs/max2tg.log
-```
-
-Остановка:
-
-```bash
-docker-compose down
-```
-
-Пересборка после обновления:
-
-```bash
-docker-compose up -d --build
-```
-
-### Локальный запуск
-
-#### Linux / macOS
-
-```bash
-git clone <repo-url> max2tg
-cd max2tg
-
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-cp .env.example .env
-# отредактируйте .env
-
-python -m app.main
-```
-
-#### Windows (PowerShell)
-
-```powershell
-git clone <repo-url> max2tg
-cd max2tg
-
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-
-copy .env.example .env
-# отредактируйте .env
-
-python -m app.main
-```
-
-#### Windows (CMD)
-
-```cmd
-git clone <repo-url> max2tg
-cd max2tg
-
-python -m venv .venv
-.venv\Scripts\activate.bat
-pip install -r requirements.txt
-
-copy .env.example .env
-# отредактируйте .env
-
-python -m app.main
-```
-
-### Запуск как systemd-сервис (Linux)
-
-Создайте файл `/etc/systemd/system/max2tg.service`:
-
-```ini
-[Unit]
-Description=Max to Telegram forwarder
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/max2tg
-ExecStart=/opt/max2tg/.venv/bin/python -m app.main
-Restart=always
-RestartSec=10
-EnvironmentFile=/opt/max2tg/.env
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now max2tg
-sudo journalctl -u max2tg -f
-```
+`max-bridge` сам по SSH разворачивает `tg-relay`, поднимает SSH tunnel и общается с relay по приватному HTTP API.
 
 ## Как это работает
 
-```
-Max (WebSocket) ──→ max2tg ──→ Telegram Bot ──→ темы в вашем TG_CHAT_ID
-                       ↑                            │
-                       └── (если REPLY_ENABLED) ────┘
+```text
+Max WebSocket
+    |
+    v
+max-bridge (RU)
+    |  SSH deploy + SSH tunnel
+    v
+tg-relay (foreign)
+    |
+    v
+Telegram topics
 ```
 
-1. Приложение подключается к Max через WebSocket как ваш аккаунт
-2. Для каждого чата Max бот находит или создаёт отдельную тему Telegram и пересылает сообщения туда
-3. Если `REPLY_ENABLED=true`, текст и подписи к медиа, написанные в теме Telegram, отправляются обратно в соответствующий чат Max
+Поток Max -> Telegram:
 
-## Структура проекта
+1. `max-bridge` получает событие из Max.
+2. Формирует Telegram-ready batch с уже подготовленным текстом/подписями и байтами вложений.
+3. Отправляет batch в `tg-relay` по внутреннему API через SSH tunnel.
+4. `tg-relay` находит или создает тему Telegram и отправляет туда batch.
 
+Поток Telegram -> Max:
+
+1. `tg-relay` получает сообщение в теме Telegram.
+2. По `topic_store` определяет соответствующий чат Max.
+3. Складывает команду в локальную очередь `command_store`.
+4. `max-bridge` long-poll'ом забирает команду и отправляет ее в Max.
+
+## Роли
+
+### `APP_ROLE=max-bridge`
+
+Используется на российском сервере.
+
+Обязательные env:
+
+- `RELAY_SHARED_SECRET`
+- `MAX_TOKEN`
+- `MAX_DEVICE_ID`
+- `FOREIGN_SSH_HOST`
+- `FOREIGN_SSH_USER`
+- `FOREIGN_SSH_PRIVATE_KEY`
+- `FOREIGN_RELAY_ENV_B64`, если `REMOTE_DEPLOY_ENABLED=true`
+
+Опционально:
+
+- `MAX_CHAT_IDS`
+- `REPLY_ENABLED`
+- `DEBUG`
+- `FOREIGN_SSH_PORT`
+- `FOREIGN_APP_DIR`
+- `RELAY_TUNNEL_LOCAL_PORT`
+- `REMOTE_DEPLOY_ENABLED`
+
+### `APP_ROLE=tg-relay`
+
+Используется на зарубежном сервере.
+
+Обязательные env:
+
+- `RELAY_SHARED_SECRET`
+- `TG_BOT_TOKEN`
+- `TG_CHAT_ID`
+
+Опционально:
+
+- `RELAY_BIND_HOST`
+- `RELAY_BIND_PORT`
+- `TOPIC_DB_PATH`
+- `COMMAND_DB_PATH`
+- `REPLY_ENABLED`
+- `DEBUG`
+
+## Быстрый старт
+
+### 1. Подготовьте foreign relay env
+
+Возьмите шаблон [.env.relay.example](./.env.relay.example), заполните его и закодируйте в base64 одной строкой.
+
+Linux/macOS:
+
+```bash
+base64 -w0 .env.relay.example
 ```
-max2tg/
-├── app/
-│   ├── main.py          # точка входа
-│   ├── config.py         # загрузка настроек из .env
-│   ├── max_client.py     # WebSocket-клиент Max
-│   ├── max_listener.py   # обработка и форматирование сообщений
-│   ├── resolver.py       # кеш и резолвинг имён контактов/чатов
-│   ├── topic_router.py   # создание и выбор Telegram-топиков для Max-чатов
-│   ├── topic_store.py    # SQLite-хранилище соответствий топиков
-│   ├── tg_sender.py      # отправка сообщений в Telegram
-│   └── tg_handler.py     # обработка ответов из Telegram
-├── tests/
-│   ├── test_config.py             # тесты загрузки настроек
-│   ├── test_max_client.py         # тесты клиента Max (опкоды, парсинг)
-│   ├── test_max_listener.py       # тесты форматирования сообщений
-│   ├── test_resolver.py           # тесты резолвинга имён контактов
-│   ├── test_tg_handler.py         # тесты обработки ответов из Telegram
-│   └── test_disconnect_notify.py  # тесты уведомлений о статусе соединения
-├── data/                # SQLite-хранилище топиков (создаётся автоматически)
-├── logs/                # логи (создаётся автоматически)
-├── .env.example
-├── Dockerfile
-├── docker-compose.yml
-├── pytest.ini
-└── requirements.txt
+
+PowerShell:
+
+```powershell
+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content .env.relay.example -Raw)))
 ```
+
+Полученную строку вставьте в `FOREIGN_RELAY_ENV_B64` на российском сервере.
+
+### 2. Заполните env для bridge-узла
+
+Скопируйте [.env.example](./.env.example) в `.env` и заполните:
+
+```bash
+cp .env.example .env
+```
+
+Главное:
+
+- `MAX_TOKEN` и `MAX_DEVICE_ID` берутся из `web.max.ru`
+- `FOREIGN_SSH_PRIVATE_KEY` содержит приватный ключ целиком
+- `RELAY_SHARED_SECRET` должен совпадать на обоих узлах
+
+### 3. Запустите bridge-узел
+
+```bash
+docker compose up -d --build
+```
+
+На старте `max-bridge`:
+
+1. собирает snapshot текущего репозитория;
+2. загружает его на зарубежный сервер;
+3. кладет туда foreign `.env`;
+4. запускает `docker compose up -d --build`;
+5. поднимает SSH tunnel;
+6. после успешного `/healthz` стартует Max listener.
+
+## Режим без автодеплоя
+
+Если relay уже развернут вручную, можно оставить туннель, но отключить загрузку snapshot:
+
+```env
+REMOTE_DEPLOY_ENABLED=false
+```
+
+В этом режиме `max-bridge` не копирует код на зарубежный сервер и только открывает SSH tunnel.
+
+## Docker
+
+Один и тот же образ используется для обеих ролей.
+
+`docker-compose.yml` всегда публикует relay-порт только на `127.0.0.1` хоста:
+
+```text
+127.0.0.1:${RELAY_BIND_PORT}:${RELAY_BIND_PORT}
+```
+
+Поэтому `tg-relay` не торчит наружу, даже если внутри контейнера слушает `0.0.0.0`.
+
+## Внутренний API relay
+
+- `POST /internal/telegram-batch`
+- `GET /internal/max-commands/pull`
+- `POST /internal/max-commands/{id}/ack`
+- `GET /healthz`
+
+Все внутренние endpoint'ы, кроме `/healthz`, требуют заголовок:
+
+```text
+X-Relay-Secret: <RELAY_SHARED_SECRET>
+```
+
+## Хранилища
+
+На relay-узле:
+
+- `TOPIC_DB_PATH` — соответствия `Max chat <-> Telegram topic`
+- `COMMAND_DB_PATH` — очередь команд `Telegram -> Max`
+
+На bridge-узле локальный `topic_store` больше не используется.
 
 ## Тесты
 
-Установите зависимости для тестирования:
-
 ```bash
-pip install pytest pytest-asyncio
+python -m pytest
 ```
 
-Запуск тестов:
-
-```bash
-pytest
-```
-
-Тесты покрывают:
-- загрузку и валидацию конфигурации (`config.py`)
-- парсинг сообщений и опкоды WebSocket-клиента (`max_client.py`)
-- форматирование размеров файлов и определение типа медиа (`max_listener.py`)
-- резолвинг имён контактов и парсинг снапшота (`resolver.py`)
-- SQLite-хранилище и маршрутизацию Telegram-топиков
-- обработку сообщений из Telegram-топиков и пересылку в Max (`tg_handler.py`)
-- уведомления о статусе соединения и логику троттлинга (`test_disconnect_notify.py`)
-
----
-
-<a id="english"></a>
-
-# max2tg (English)
-
-Real-time message forwarding from **Max** messenger (max.ru) to **Telegram** — with optional reply support.
-
-> **Disclaimer:** This is an unofficial project. It is not affiliated with or endorsed by the Max development team. The application works via reverse engineering of the Max web client and may break at any time if the protocol changes. Use at your own risk. The author is not responsible for any consequences, including account suspension.
-
-## Features
-
-- Forwards text messages, photos, videos, files, audio, stickers, contacts, locations, and links
-- Supports forwarded and quoted messages (forward / reply)
-- Different formatting for DMs and group chats
-- A separate Telegram topic for each Max chat and replies from those topics back to Max
-- Connection status notifications — on startup, disconnect, and reconnect (throttled to avoid spam)
-- Works as a userbot — connects to your Max account via WebSocket
-- Docker-ready: deploy with a single command
-
-## Requirements
-
-- Python 3.12+
-- Max account (web.max.ru)
-- Telegram bot (create via [@BotFather](https://t.me/BotFather))
-
-## Obtaining Credentials
-
-### Max: token and device ID
-
-1. Open [web.max.ru](https://web.max.ru) in Chrome/Firefox and log in
-2. Open DevTools: `F12` (or `Cmd+Option+I` on macOS)
-3. Go to the **Application** tab (Chrome) or **Storage** (Firefox)
-4. In the left panel: **Local Storage → https://web.max.ru**
-5. Find and copy the values:
-   - `__oneme_auth` → this is your `MAX_TOKEN`
-   - `__oneme_device_id` → this is your `MAX_DEVICE_ID`
-
-> **Important:** do not share these values — they grant full access to your Max account.
-
-### Telegram: bot token and chat ID
-
-1. Message [@BotFather](https://t.me/BotFather) on Telegram → `/newbot` → follow the instructions
-2. Copy the token → this is your `TG_BOT_TOKEN`
-3. Create a Telegram supergroup, enable topics, and add the bot as an admin with topic management rights
-4. Get this supergroup ID — this is `TG_CHAT_ID`
-
-## Configuration
-
-Copy the example config and fill in the values:
-
-```bash
-cp .env.example .env
-```
-
-`.env` contents:
-
-| Variable | Required | Description |
-|---|---|---|
-| `MAX_TOKEN` | yes | Max auth token |
-| `MAX_DEVICE_ID` | yes | Max device ID |
-| `MAX_CHAT_IDS` | no | Comma-separated list of Max chat IDs to listen to (all chats if unset) |
-| `TG_BOT_TOKEN` | yes | Telegram bot token |
-| `TG_CHAT_ID` | yes | Forum-enabled Telegram supergroup ID |
-| `TOPIC_DB_PATH` | no | SQLite file for Max↔Telegram topic mappings |
-| `DEBUG` | no | `true` — verbose logs + JSON dumps to `debug/` |
-| `REPLY_ENABLED` | no | `true` — enable replies from Telegram topics to Max |
-| `LOG_DIR` | no | Log directory path (default: `logs`) |
-
-## Running
-
-### Docker (recommended for servers)
-
-```bash
-git clone git@github.com:Aist/max2tg.git max2tg
-cd max2tg
-cp .env.example .env
-# edit .env
-
-docker-compose up -d
-```
-
-Docker logs (stdout):
-
-```bash
-docker-compose logs -f
-```
-
-Persistent logs are available on the host in `./logs/` — file `max2tg.log` with rotation at 10 MB (5 files kept). Max↔Telegram topic mappings are stored in `./data/topics.sqlite3`:
-
-```bash
-tail -f logs/max2tg.log
-```
-
-Stop:
-
-```bash
-docker-compose down
-```
-
-Rebuild after update:
-
-```bash
-docker-compose up -d --build
-```
-
-### Local
-
-#### Linux / macOS
-
-```bash
-git clone <repo-url> max2tg
-cd max2tg
-
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-cp .env.example .env
-# edit .env
-
-python -m app.main
-```
-
-#### Windows (PowerShell)
-
-```powershell
-git clone <repo-url> max2tg
-cd max2tg
-
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-
-copy .env.example .env
-# edit .env
-
-python -m app.main
-```
-
-#### Windows (CMD)
-
-```cmd
-git clone <repo-url> max2tg
-cd max2tg
-
-python -m venv .venv
-.venv\Scripts\activate.bat
-pip install -r requirements.txt
-
-copy .env.example .env
-# edit .env
-
-python -m app.main
-```
-
-### Running as a systemd service (Linux)
-
-Create `/etc/systemd/system/max2tg.service`:
-
-```ini
-[Unit]
-Description=Max to Telegram forwarder
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/max2tg
-ExecStart=/opt/max2tg/.venv/bin/python -m app.main
-Restart=always
-RestartSec=10
-EnvironmentFile=/opt/max2tg/.env
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now max2tg
-sudo journalctl -u max2tg -f
-```
-
-## How It Works
-
-```
-Max (WebSocket) ──→ max2tg ──→ Telegram Bot ──→ topics in TG_CHAT_ID
-                       ↑                            │
-                       └── (if REPLY_ENABLED) ──────┘
-```
-
-1. The app connects to Max via WebSocket using your account credentials
-2. For each Max chat, the bot finds or creates a dedicated Telegram topic and forwards messages there
-3. If `REPLY_ENABLED=true`, text and media captions written in a Telegram topic are sent back to the corresponding Max chat
-
-## Project Structure
-
-```
-max2tg/
-├── app/
-│   ├── main.py          # entry point
-│   ├── config.py         # loads settings from .env
-│   ├── max_client.py     # Max WebSocket client
-│   ├── max_listener.py   # message processing and formatting
-│   ├── resolver.py       # contact/chat name cache and resolution
-│   ├── topic_router.py   # creates and selects Telegram topics for Max chats
-│   ├── topic_store.py    # SQLite storage for topic mappings
-│   ├── tg_sender.py      # sends messages to Telegram
-│   └── tg_handler.py     # handles replies from Telegram
-├── tests/
-│   ├── test_config.py             # settings loading tests
-│   ├── test_max_client.py         # Max client tests (opcodes, parsing)
-│   ├── test_max_listener.py       # message formatting tests
-│   ├── test_resolver.py           # contact name resolution tests
-│   ├── test_tg_handler.py         # Telegram reply handler tests
-│   └── test_disconnect_notify.py  # connection status notification tests
-├── data/                # topic mapping database (created automatically)
-├── logs/                # log files (created automatically)
-├── .env.example
-├── Dockerfile
-├── docker-compose.yml
-├── pytest.ini
-└── requirements.txt
-```
-
-## Tests
-
-Install test dependencies:
-
-```bash
-pip install pytest pytest-asyncio
-```
-
-Run tests:
-
-```bash
-pytest
-```
-
-Test coverage:
-- configuration loading and validation (`config.py`)
-- message parsing and WebSocket opcodes (`max_client.py`)
-- file size formatting and media type detection (`max_listener.py`)
-- contact name resolution and snapshot parsing (`resolver.py`)
-- SQLite topic storage and Telegram topic routing
-- Telegram topic message handling and forwarding to Max (`tg_handler.py`)
-- connection status notifications and throttle logic (`test_disconnect_notify.py`)
-
-## License
-
-MIT
+Покрываются:
+
+- role-aware конфиг и валидация env;
+- batching Max -> relay;
+- relay HTTP API;
+- очередь Telegram -> Max;
+- сквозной round-trip двухузловой схемы.
