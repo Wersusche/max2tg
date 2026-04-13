@@ -1,17 +1,17 @@
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim
 
-ENV MALLOC_ARENA_MAX=2
+ENV MALLOC_ARENA_MAX=2 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client ca-certificates tar gzip \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir --progress-bar off -r requirements.txt
-
-FROM python:3.12-alpine
-
-WORKDIR /app
-
-COPY --from=builder /usr/local/lib/python3.12/site-packages/ /usr/local/lib/python3.12/site-packages/
 
 COPY . .
 

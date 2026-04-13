@@ -227,3 +227,63 @@ class TestTopicRouting:
         router.forget_max_chat.assert_called_once_with(100)
         assert router.ensure_topic.await_count == 2
         assert sender.send.await_args_list[1].kwargs["message_thread_id"] == 88
+
+
+class TestRelayBatching:
+    def _make_client(self, is_dm=True):
+        sender = AsyncMock()
+        sender.send = AsyncMock(return_value="ok")
+
+        relay_client = AsyncMock()
+        relay_client.send_batch = AsyncMock(return_value=None)
+
+        resolver = MagicMock()
+        resolver.resolve_user = AsyncMock(return_value="Alice")
+        resolver.is_dm.return_value = is_dm
+        resolver.chat_name.return_value = "Max Group"
+        resolver.load_snapshot.return_value = []
+
+        with patch("app.max_listener.ContactResolver", return_value=resolver):
+            client = create_max_client(
+                max_token="tok",
+                max_device_id="dev",
+                sender=sender,
+                relay_client=relay_client,
+            )
+
+        return client, relay_client
+
+    @pytest.mark.asyncio
+    async def test_text_message_is_batched_for_relay(self):
+        client, relay_client = self._make_client(is_dm=True)
+        msg = MaxMessage(chat_id=42, sender_id=7, text="Hello")
+
+        await client._on_message_cb(msg)
+
+        relay_client.send_batch.assert_awaited_once()
+        batch = relay_client.send_batch.await_args.args[0]
+        attachments = relay_client.send_batch.await_args.args[1]
+        assert batch.max_chat_id == "42"
+        assert batch.topic_name == "Alice"
+        assert [op.kind for op in batch.operations] == ["text"]
+        assert "Hello" in batch.operations[0].text
+        assert attachments == {}
+
+    @pytest.mark.asyncio
+    async def test_photo_attachment_is_batched_with_uploaded_part(self):
+        client, relay_client = self._make_client(is_dm=False)
+        client.download_file = AsyncMock(return_value=b"image-bytes")
+        msg = MaxMessage(
+            chat_id=77,
+            sender_id=2,
+            attaches=[{"_type": "PHOTO", "baseUrl": "https://example.com/pic.jpg"}],
+        )
+
+        await client._on_message_cb(msg)
+
+        batch = relay_client.send_batch.await_args.args[0]
+        attachments = relay_client.send_batch.await_args.args[1]
+        assert batch.topic_name == "Max Group"
+        assert [op.kind for op in batch.operations] == ["photo"]
+        assert batch.operations[0].attachment_field == "file0"
+        assert attachments["file0"][1] == b"image-bytes"
