@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import tarfile
 import tempfile
 from pathlib import Path
@@ -54,16 +55,10 @@ class RemoteRelayManager:
 
     async def deploy(self) -> None:
         await self._prepare_local_files()
-        await self._run_ssh(["mkdir", "-p", self.remote_app_dir])
+        await self._run_ssh([f"mkdir -p {shlex.quote(self.remote_app_dir)}"])
         await self._run_scp(self._archive_path, f"{self._remote_target()}:{self.remote_app_dir}/bundle.tar.gz")
         await self._run_scp(self._env_path, f"{self._remote_target()}:{self.remote_app_dir}/.env")
-        remote_cmd = (
-            f"cd {self.remote_app_dir} "
-            "&& tar -xzf bundle.tar.gz "
-            "&& rm -f bundle.tar.gz "
-            "&& docker compose up -d --build"
-        )
-        await self._run_ssh([remote_cmd])
+        await self._run_ssh([self._build_remote_deploy_command()])
 
     async def ensure_tunnel(self) -> None:
         if self._tunnel_proc is not None and self._tunnel_proc.returncode is None:
@@ -183,6 +178,15 @@ class RemoteRelayManager:
 
     def _remote_target(self) -> str:
         return f"{self.user}@{self.host}"
+
+    def _build_remote_deploy_command(self) -> str:
+        remote_dir = shlex.quote(self.remote_app_dir)
+        return (
+            f"cd {remote_dir} "
+            "&& tar -xzf bundle.tar.gz "
+            "&& rm -f bundle.tar.gz "
+            "&& sh ./scripts/bootstrap_remote.sh"
+        )
 
     def _cleanup_temp_files(self) -> None:
         for path in sorted(self._temp_dir.rglob("*"), reverse=True):

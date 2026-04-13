@@ -134,7 +134,7 @@ docker compose up -d --build
 1. собирает snapshot текущего репозитория;
 2. загружает его на зарубежный сервер;
 3. кладет туда foreign `.env`;
-4. запускает `docker compose up -d --build`;
+4. при необходимости ставит Docker/Compose и запускает `docker compose up -d --build`;
 5. поднимает SSH tunnel;
 6. после успешного `/healthz` стартует Max listener.
 
