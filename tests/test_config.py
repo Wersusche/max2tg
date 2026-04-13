@@ -13,6 +13,21 @@ from app.config import (
     load_settings,
 )
 
+OPENSSH_PRIVATE_KEY = "\n".join(
+    [
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW",
+        "QyNTUxOQAAACD58iHNas/wVNn0hgWHdOv19P5F8m8M7bZ179RoBTMDpQAAAKAIqVTdCKlU",
+        "3QAAAAtzc2gtZWQyNTUxOQAAACD58iHNas/wVNn0hgWHdOv19P5F8m8M7bZ179RoBTMDpQ",
+        "AAAEDzts/jCJHZ2VR/DDkD9xtu8X14UPsPR8jdkpAKlH35HvnyIc1qz/BU2fSGBYd06/X0",
+        "/kXybwzttnXv1GgFMwOlAAAAFm1heC1icmlkZ2UtdG8tdGctcmVsYXkBAgMEBQYH",
+        "-----END OPENSSH PRIVATE KEY-----",
+    ]
+) + "\n"
+OPENSSH_PRIVATE_KEY_LITERAL_N = OPENSSH_PRIVATE_KEY.rstrip("\n").replace("\n", "\\n")
+OPENSSH_PRIVATE_KEY_LITERAL_CRLF = OPENSSH_PRIVATE_KEY.rstrip("\n").replace("\n", "\\r\\n")
+OPENSSH_PRIVATE_KEY_CRLF = OPENSSH_PRIVATE_KEY.replace("\n", "\r\n")
+
 
 def _load_settings_with_env(env: dict) -> Settings:
     with patch("app.config.load_dotenv"), patch.dict(os.environ, env, clear=True):
@@ -31,7 +46,7 @@ def _bridge_env(**overrides) -> dict[str, str]:
         "MAX_DEVICE_ID": "device-abc",
         "FOREIGN_SSH_HOST": "relay.example.com",
         "FOREIGN_SSH_USER": "deploy",
-        "FOREIGN_SSH_PRIVATE_KEY": "-----BEGIN KEY-----\nabc\n-----END KEY-----",
+        "FOREIGN_SSH_PRIVATE_KEY": OPENSSH_PRIVATE_KEY,
         "FOREIGN_RELAY_ENV_B64": _b64_env(
             "\n".join(
                 [
@@ -86,6 +101,7 @@ class TestLoadSettingsMaxBridge:
         assert settings.debug is True
         assert settings.reply_enabled is True
         assert settings.foreign_ssh_host == "relay.example.com"
+        assert settings.foreign_ssh_private_key == OPENSSH_PRIVATE_KEY
         assert settings.foreign_relay_env_text.startswith("APP_ROLE=tg-relay")
 
     def test_remote_deploy_env_blob_optional_when_deploy_disabled(self):
@@ -94,6 +110,26 @@ class TestLoadSettingsMaxBridge:
         )
         assert settings.remote_deploy_enabled is False
         assert settings.foreign_relay_env_b64 is None
+
+    def test_multiline_private_key_is_preserved(self):
+        settings = _load_settings_with_env(_bridge_env(FOREIGN_SSH_PRIVATE_KEY=OPENSSH_PRIVATE_KEY))
+        assert settings.foreign_ssh_private_key == OPENSSH_PRIVATE_KEY
+
+    def test_literal_newline_private_key_is_normalized(self):
+        settings = _load_settings_with_env(
+            _bridge_env(FOREIGN_SSH_PRIVATE_KEY=OPENSSH_PRIVATE_KEY_LITERAL_N)
+        )
+        assert settings.foreign_ssh_private_key == OPENSSH_PRIVATE_KEY
+
+    def test_literal_windows_newline_private_key_is_normalized(self):
+        settings = _load_settings_with_env(
+            _bridge_env(FOREIGN_SSH_PRIVATE_KEY=OPENSSH_PRIVATE_KEY_LITERAL_CRLF)
+        )
+        assert settings.foreign_ssh_private_key == OPENSSH_PRIVATE_KEY
+
+    def test_windows_line_endings_private_key_are_normalized(self):
+        settings = _load_settings_with_env(_bridge_env(FOREIGN_SSH_PRIVATE_KEY=OPENSSH_PRIVATE_KEY_CRLF))
+        assert settings.foreign_ssh_private_key == OPENSSH_PRIVATE_KEY
 
     def test_default_app_role_is_max_bridge(self):
         env = _bridge_env()
@@ -134,6 +170,11 @@ class TestLoadSettingsMaxBridge:
         with pytest.raises(SystemExit) as exc:
             _load_settings_with_env(_bridge_env(FOREIGN_RELAY_ENV_B64="%%%"))
         assert "FOREIGN_RELAY_ENV_B64" in str(exc.value)
+
+    def test_invalid_private_key_raises(self):
+        with pytest.raises(SystemExit) as exc:
+            _load_settings_with_env(_bridge_env(FOREIGN_SSH_PRIVATE_KEY="not-a-private-key"))
+        assert "FOREIGN_SSH_PRIVATE_KEY" in str(exc.value)
 
 
 class TestLoadSettingsRelay:
