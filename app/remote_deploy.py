@@ -10,6 +10,14 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+REQUIRED_ARCHIVE_PATHS = (
+    Path("app/main.py"),
+    Path("scripts/bootstrap_remote.sh"),
+    Path("docker-compose.yml"),
+    Path("Dockerfile"),
+    Path("requirements.txt"),
+)
+
 IGNORED_ARCHIVE_PARTS = {
     ".git",
     ".venv",
@@ -44,7 +52,7 @@ class RemoteRelayManager:
         self.relay_bind_port = relay_bind_port
         self.local_tunnel_port = local_tunnel_port
         self.remote_env_text = remote_env_text
-        self.workspace_dir = Path(workspace_dir)
+        self.workspace_dir = Path(workspace_dir).resolve()
         self.remote_deploy_enabled = remote_deploy_enabled
         self._temp_dir = Path(tempfile.mkdtemp(prefix="max2tg-remote-"))
         self._key_path = self._temp_dir / "foreign.key"
@@ -127,12 +135,28 @@ class RemoteRelayManager:
         self._prepared = True
 
     def _build_archive(self) -> None:
+        self._validate_workspace_files()
         with tarfile.open(self._archive_path, mode="w:gz") as archive:
-            for path in self.workspace_dir.rglob("*"):
+            for path in sorted(self.workspace_dir.iterdir()):
                 relative = path.relative_to(self.workspace_dir)
                 if self._should_skip(relative):
                     continue
-                archive.add(path, arcname=str(relative))
+                archive.add(path, arcname=str(relative), filter=self._archive_filter)
+
+    def _archive_filter(self, tarinfo: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        if self._should_skip(Path(tarinfo.name)):
+            return None
+        return tarinfo
+
+    def _validate_workspace_files(self) -> None:
+        missing = [str(relative) for relative in REQUIRED_ARCHIVE_PATHS if not (self.workspace_dir / relative).exists()]
+        if not self.workspace_dir.is_dir():
+            raise RuntimeError(f"Workspace directory does not exist: {self.workspace_dir}")
+        if missing:
+            raise RuntimeError(
+                "Remote deploy bundle is missing required project files: "
+                f"{', '.join(missing)}"
+            )
 
     def _should_skip(self, relative: Path) -> bool:
         parts = set(relative.parts)
@@ -185,6 +209,7 @@ class RemoteRelayManager:
             f"cd {remote_dir} "
             "&& tar -xzf bundle.tar.gz "
             "&& rm -f bundle.tar.gz "
+            "&& if [ ! -f ./scripts/bootstrap_remote.sh ]; then echo 'Missing scripts/bootstrap_remote.sh in remote deploy bundle.' >&2; exit 1; fi "
             "&& sh ./scripts/bootstrap_remote.sh"
         )
 

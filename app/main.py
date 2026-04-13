@@ -5,6 +5,7 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from aiohttp import web
 from telegram import Update
@@ -23,6 +24,7 @@ from app.topic_store import TopicStore
 threading.stack_size(524288)
 
 log = logging.getLogger("max2tg")
+APP_ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
 class _SyncExecutor(ThreadPoolExecutor):
@@ -118,7 +120,7 @@ async def _run_max_bridge(settings) -> None:
         relay_bind_port=settings.relay_bind_port,
         local_tunnel_port=settings.relay_tunnel_local_port,
         remote_env_text=settings.foreign_relay_env_text,
-        workspace_dir=os.getcwd(),
+        workspace_dir=str(APP_ROOT_DIR),
         remote_deploy_enabled=settings.remote_deploy_enabled,
     )
 
