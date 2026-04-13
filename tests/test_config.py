@@ -101,6 +101,14 @@ class TestLoadSettingsMaxBridge:
         settings = _load_settings_with_env(env)
         assert settings.app_role == APP_ROLE_MAX_BRIDGE
 
+    def test_bridge_allows_shared_compose_relay_host(self):
+        settings = _load_settings_with_env(_bridge_env(RELAY_BIND_HOST="0.0.0.0"))
+        assert settings.relay_bind_host == "0.0.0.0"
+
+    def test_bridge_allows_custom_relay_port_for_tunnel(self):
+        settings = _load_settings_with_env(_bridge_env(RELAY_BIND_PORT="19090"))
+        assert settings.relay_bind_port == 19090
+
     def test_missing_required_bridge_var_raises(self):
         env = _bridge_env()
         env.pop("MAX_TOKEN")
