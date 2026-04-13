@@ -124,7 +124,7 @@ def load_settings() -> Settings:
             _require(env, ["FOREIGN_RELAY_ENV_B64"])
         _reject_present(
             env,
-            ["TG_BOT_TOKEN", "TG_CHAT_ID", "TOPIC_DB_PATH", "COMMAND_DB_PATH", "RELAY_BIND_HOST", "RELAY_BIND_PORT"],
+            ["TG_BOT_TOKEN", "TG_CHAT_ID", "TOPIC_DB_PATH", "COMMAND_DB_PATH"],
             role=settings.app_role,
         )
         _validate_base64_env(settings.foreign_relay_env_b64)

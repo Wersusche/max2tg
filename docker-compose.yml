@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   max2tg:
     build: .
@@ -7,7 +5,7 @@ services:
     env_file: .env
     environment:
       LOG_DIR: /app/logs
-      RELAY_BIND_HOST: 0.0.0.0
+      RELAY_BIND_HOST: ${RELAY_BIND_HOST:-}
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
