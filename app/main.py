@@ -117,7 +117,7 @@ async def _run_max_bridge(settings) -> None:
         user=settings.foreign_ssh_user,
         private_key=settings.foreign_ssh_private_key,
         remote_app_dir=settings.foreign_app_dir,
-        relay_bind_port=settings.relay_bind_port,
+        relay_host_port=settings.foreign_relay_host_port,
         local_tunnel_port=settings.relay_tunnel_local_port,
         remote_env_text=settings.foreign_relay_env_text,
         workspace_dir=str(APP_ROOT_DIR),

@@ -88,8 +88,10 @@ class TestSettingsDataclass:
         assert settings.command_db_path == "data/commands.sqlite3"
         assert settings.relay_bind_host == "127.0.0.1"
         assert settings.relay_bind_port == 8080
+        assert settings.relay_host_port == 8080
         assert settings.relay_tunnel_local_port == 18080
         assert settings.foreign_app_dir == "/home/relay/max2tg"
+        assert settings.foreign_relay_host_port == 8080
 
 
 class TestLoadSettingsMaxBridge:
@@ -145,6 +147,33 @@ class TestLoadSettingsMaxBridge:
     def test_bridge_allows_custom_relay_port_for_tunnel(self):
         settings = _load_settings_with_env(_bridge_env(RELAY_BIND_PORT="19090"))
         assert settings.relay_bind_port == 19090
+        assert settings.relay_host_port == 19090
+        assert settings.foreign_relay_host_port == 19090
+
+    def test_bridge_allows_custom_relay_host_port_for_tunnel(self):
+        settings = _load_settings_with_env(_bridge_env(RELAY_BIND_PORT="19090", RELAY_HOST_PORT="29090"))
+        assert settings.relay_bind_port == 19090
+        assert settings.relay_host_port == 29090
+
+    def test_bridge_reads_foreign_relay_host_port_from_remote_env_blob(self):
+        remote_env_text = "\n".join(
+            [
+                "APP_ROLE=tg-relay",
+                "RELAY_SHARED_SECRET=secret-123",
+                "TG_BOT_TOKEN=123456:AAABBBCCC",
+                "TG_CHAT_ID=-100123456",
+                "RELAY_BIND_PORT=8080",
+                "RELAY_HOST_PORT=38080",
+            ]
+        )
+        settings = _load_settings_with_env(
+            _bridge_env(
+                RELAY_HOST_PORT="29090",
+                FOREIGN_RELAY_ENV_B64=_b64_env(remote_env_text),
+            )
+        )
+        assert settings.relay_host_port == 29090
+        assert settings.foreign_relay_host_port == 38080
 
     def test_bridge_uses_new_default_foreign_app_dir(self):
         settings = _load_settings_with_env(_bridge_env(FOREIGN_APP_DIR=""))
@@ -175,6 +204,20 @@ class TestLoadSettingsMaxBridge:
         with pytest.raises(SystemExit) as exc:
             _load_settings_with_env(_bridge_env(FOREIGN_RELAY_ENV_B64="%%%"))
         assert "FOREIGN_RELAY_ENV_B64" in str(exc.value)
+
+    def test_invalid_remote_relay_host_port_in_env_blob_raises(self):
+        remote_env_text = "\n".join(
+            [
+                "APP_ROLE=tg-relay",
+                "RELAY_SHARED_SECRET=secret-123",
+                "TG_BOT_TOKEN=123456:AAABBBCCC",
+                "TG_CHAT_ID=-100123456",
+                "RELAY_HOST_PORT=not-a-port",
+            ]
+        )
+        with pytest.raises(SystemExit) as exc:
+            _load_settings_with_env(_bridge_env(FOREIGN_RELAY_ENV_B64=_b64_env(remote_env_text)))
+        assert "RELAY_HOST_PORT" in str(exc.value)
 
     def test_invalid_private_key_raises(self):
         with pytest.raises(SystemExit) as exc:

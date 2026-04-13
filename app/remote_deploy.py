@@ -28,6 +28,11 @@ IGNORED_ARCHIVE_PARTS = {
     "debug",
 }
 
+PORT_CONFLICT_MARKERS = (
+    "failed to bind host port 127.0.0.1:",
+    "address already in use",
+)
+
 
 class RemoteRelayManager:
     def __init__(
@@ -38,7 +43,7 @@ class RemoteRelayManager:
         user: str,
         private_key: str,
         remote_app_dir: str,
-        relay_bind_port: int,
+        relay_host_port: int,
         local_tunnel_port: int,
         remote_env_text: str,
         workspace_dir: str,
@@ -49,7 +54,7 @@ class RemoteRelayManager:
         self.user = user
         self.private_key = private_key
         self.remote_app_dir = remote_app_dir
-        self.relay_bind_port = relay_bind_port
+        self.relay_host_port = relay_host_port
         self.local_tunnel_port = local_tunnel_port
         self.remote_env_text = remote_env_text
         self.workspace_dir = Path(workspace_dir).resolve()
@@ -76,7 +81,7 @@ class RemoteRelayManager:
             "ssh",
             "-N",
             "-L",
-            f"{self.local_tunnel_port}:127.0.0.1:{self.relay_bind_port}",
+            f"{self.local_tunnel_port}:127.0.0.1:{self.relay_host_port}",
             "-p",
             str(self.port),
             "-i",
@@ -93,7 +98,7 @@ class RemoteRelayManager:
             "ServerAliveCountMax=3",
             self._remote_target(),
         ]
-        log.info("Opening SSH tunnel to %s:%s", self.host, self.relay_bind_port)
+        log.info("Opening SSH tunnel to %s:%s", self.host, self.relay_host_port)
         self._tunnel_proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
@@ -231,8 +236,29 @@ async def _run_command(args: list[str]) -> None:
     stdout, stderr = await proc.communicate()
     if proc.returncode == 0:
         return
+    stdout_text = stdout.decode("utf-8", "ignore")
+    stderr_text = stderr.decode("utf-8", "ignore")
     raise RuntimeError(
-        f"Command failed ({proc.returncode}): {' '.join(args)}\n"
-        f"STDOUT:\n{stdout.decode('utf-8', 'ignore')}\n"
-        f"STDERR:\n{stderr.decode('utf-8', 'ignore')}"
+        _format_command_failure(
+            args=args,
+            returncode=proc.returncode,
+            stdout_text=stdout_text,
+            stderr_text=stderr_text,
+        )
     )
+
+
+def _format_command_failure(*, args: list[str], returncode: int, stdout_text: str, stderr_text: str) -> str:
+    message = (
+        f"Command failed ({returncode}): {' '.join(args)}\n"
+        f"STDOUT:\n{stdout_text}\n"
+        f"STDERR:\n{stderr_text}"
+    )
+    if all(marker in stderr_text for marker in PORT_CONFLICT_MARKERS):
+        message += (
+            "\nHINT:\n"
+            "The foreign host already has something bound to the relay localhost port. "
+            "Set RELAY_HOST_PORT in the foreign tg-relay .env to a free 127.0.0.1 port. "
+            "When REMOTE_DEPLOY_ENABLED=true, max-bridge reads that value from FOREIGN_RELAY_ENV_B64 automatically."
+        )
+    return message

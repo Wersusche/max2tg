@@ -10,7 +10,7 @@ services:
       - ./logs:/app/logs
       - ./data:/app/data
     ports:
-      - "127.0.0.1:${RELAY_BIND_PORT:-8080}:${RELAY_BIND_PORT:-8080}"
+      - "127.0.0.1:${RELAY_HOST_PORT:-${RELAY_BIND_PORT:-8080}}:${RELAY_BIND_PORT:-8080}"
     ulimits:
       nproc: 65535
       nofile:

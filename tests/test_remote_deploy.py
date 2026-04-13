@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from app.remote_deploy import RemoteRelayManager
+from app.remote_deploy import RemoteRelayManager, _format_command_failure
 
 
 def _build_manager(workspace_dir: Path, remote_app_dir="/home/relay/max2tg"):
@@ -17,7 +17,7 @@ def _build_manager(workspace_dir: Path, remote_app_dir="/home/relay/max2tg"):
             user="relay",
             private_key="-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----\n",
             remote_app_dir=remote_app_dir,
-            relay_bind_port=8080,
+            relay_host_port=8080,
             local_tunnel_port=18080,
             remote_env_text="APP_ROLE=tg-relay\n",
             workspace_dir=str(workspace_dir),
@@ -107,3 +107,18 @@ def test_bootstrap_remote_script_keeps_download_errors_visible():
 
     assert "wget -q" not in script_text
     assert "[bootstrap]" in script_text
+
+
+def test_format_command_failure_adds_relay_host_port_hint_for_bind_conflicts():
+    message = _format_command_failure(
+        args=["ssh", "relay@example.com", "docker", "compose", "up"],
+        returncode=1,
+        stdout_text="compose output",
+        stderr_text=(
+            "Error response from daemon: failed to set up container networking: "
+            "failed to bind host port 127.0.0.1:8080/tcp: address already in use"
+        ),
+    )
+
+    assert "RELAY_HOST_PORT" in message
+    assert "address already in use" in message
