@@ -1,13 +1,11 @@
 # max2tg
 
-Двухузловой мост между **Max** и **Telegram**:
+Двухузловой мост между **Max** и **Telegram**.
 
-- `max-bridge` на российском сервере держит соединение с Max, форматирует сообщения и скачивает вложения.
-- `tg-relay` на зарубежном сервере держит Telegram Bot API, создает темы и принимает ответы из Telegram обратно в очередь для Max.
+- `max-bridge` живёт на российском сервере: слушает Max, упаковывает сообщения, поднимает SSH tunnel и при необходимости сам выкатывает relay на foreign-хост.
+- `tg-relay` живёт на зарубежном сервере: держит Bot API, создаёт темы в Telegram forum, отправляет туда сообщения и складывает ответы из Telegram в очередь для Max.
 
-`max-bridge` сам по SSH разворачивает `tg-relay`, поднимает SSH tunnel и общается с relay по приватному HTTP API.
-
-## Как это работает
+## Как это устроено
 
 ```text
 Max WebSocket
@@ -19,153 +17,349 @@ max-bridge (RU)
 tg-relay (foreign)
     |
     v
-Telegram topics
+Telegram forum topics
 ```
 
-Поток Max -> Telegram:
+Поток `Max -> Telegram`:
 
 1. `max-bridge` получает событие из Max.
-2. Формирует Telegram-ready batch с уже подготовленным текстом/подписями и байтами вложений.
-3. Отправляет batch в `tg-relay` по внутреннему API через SSH tunnel.
-4. `tg-relay` находит или создает тему Telegram и отправляет туда batch.
+2. Готовит Telegram-ready batch с текстом и вложениями.
+3. Отправляет batch в `tg-relay` через внутренний HTTP API по SSH tunnel.
+4. `tg-relay` находит или создаёт тему Telegram и отправляет туда сообщение.
 
-Поток Telegram -> Max:
+Поток `Telegram -> Max`:
 
 1. `tg-relay` получает сообщение в теме Telegram.
-2. По `topic_store` определяет соответствующий чат Max.
+2. По `topic_store` понимает, какому чату Max соответствует тема.
 3. Складывает команду в локальную очередь `command_store`.
-4. `max-bridge` long-poll'ом забирает команду и отправляет ее в Max.
+4. `max-bridge` забирает команду long-poll'ом и отправляет её в Max.
 
-## Роли
+## Что нужно заранее
 
-### `APP_ROLE=max-bridge`
+1. Российский Linux-сервер, где будет запущен `max-bridge`.
+2. Зарубежный Linux-сервер, куда можно зайти по SSH.
+3. Docker и Docker Compose на российском сервере.
+4. Telegram-бот.
+5. Telegram supergroup с включёнными topics/forum.
+6. Данные Max из `web.max.ru`: `__oneme_auth` и `__oneme_device_id`.
+7. SSH-ключ, которым российский сервер будет заходить на foreign-сервер.
 
-Используется на российском сервере.
+## Самый простой сценарий развёртывания
 
-Обязательные env:
+Ниже описан самый прямой и рабочий путь: `max-bridge` сам загружает код на foreign-сервер, сам кладёт туда `.env`, сам ставит Docker/Compose при необходимости и сам запускает `tg-relay`.
 
-- `RELAY_SHARED_SECRET`
-- `MAX_TOKEN`
-- `MAX_DEVICE_ID`
-- `FOREIGN_SSH_HOST`
-- `FOREIGN_SSH_USER`
-- `FOREIGN_SSH_PRIVATE_KEY`
-- `FOREIGN_RELAY_ENV_B64`, если `REMOTE_DEPLOY_ENABLED=true`
+### Шаг 1. Подготовьте Telegram
 
-Опционально:
+1. Создайте бота через `@BotFather` и сохраните токен.
+2. Создайте **supergroup** в Telegram.
+3. Включите в ней **Topics / Forum**.
+4. Добавьте бота в эту группу.
+5. Выдайте боту права администратора как минимум на отправку сообщений и `Manage Topics`.
+6. Если нужен путь `Telegram -> Max`, отключите у бота privacy mode через `@BotFather`, иначе бот не увидит обычные сообщения в темах.
+7. Узнайте числовой `TG_CHAT_ID` этой группы. Обычно это число вида `-1001234567890`.
 
-- `MAX_CHAT_IDS`
-- `REPLY_ENABLED`
-- `DEBUG`
-- `FOREIGN_SSH_PORT`
-- `FOREIGN_APP_DIR`
-- `RELAY_TUNNEL_LOCAL_PORT`
-- `RELAY_BIND_PORT`
-- `RELAY_HOST_PORT`
-- `REMOTE_DEPLOY_ENABLED`
+Простой способ узнать `TG_CHAT_ID`:
 
-### `APP_ROLE=tg-relay`
+1. Добавьте бота в нужную supergroup.
+2. Отправьте в группу команду, например `/ping`.
+3. Откройте `https://api.telegram.org/bot<ВАШ_ТОКЕН>/getUpdates`.
+4. Возьмите значение `message.chat.id`.
 
-Используется на зарубежном сервере.
+Если нужен только путь `Max -> Telegram`, можно оставить `REPLY_ENABLED=false`.
 
-Обязательные env:
+### Шаг 2. Подготовьте foreign-сервер
 
-- `RELAY_SHARED_SECRET`
-- `TG_BOT_TOKEN`
-- `TG_CHAT_ID`
+Примеры ниже рассчитаны на Ubuntu/Debian. На других дистрибутивах логика та же.
 
-Опционально:
+Сначала на российском bridge-узле создайте отдельную пару SSH-ключей для доступа к foreign-серверу:
 
-- `RELAY_BIND_HOST`
-- `RELAY_BIND_PORT`
-- `RELAY_HOST_PORT`
-- `TOPIC_DB_PATH`
-- `COMMAND_DB_PATH`
-- `REPLY_ENABLED`
-- `DEBUG`
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/max2tg_relay -C max2tg-relay
+cat ~/.ssh/max2tg_relay.pub
+```
 
-## Быстрый старт
+Публичную часть добавьте пользователю `relay`, приватную потом вставьте в `FOREIGN_SSH_PRIVATE_KEY`.
 
-### 1. Подготовьте foreign relay env
+Создайте отдельного пользователя `relay`, подготовьте SSH и каталог приложения:
 
-Возьмите шаблон [.env.relay.example](./.env.relay.example), заполните его и закодируйте в base64 одной строкой.
+```bash
+sudo adduser --disabled-password --gecos "" relay
+
+sudo install -d -m 700 -o relay -g relay /home/relay/.ssh
+sudo install -d -m 755 -o relay -g relay /home/relay/max2tg
+sudo install -d -m 755 -o relay -g relay /home/relay/max2tg/data
+sudo install -d -m 755 -o relay -g relay /home/relay/max2tg/logs
+```
+
+Добавьте публичный SSH-ключ, соответствующий приватному ключу, который потом положите в `FOREIGN_SSH_PRIVATE_KEY` на bridge-узле:
+
+```bash
+sudo sh -c 'printf "%s\n" "ssh-ed25519 AAAA... ваш_публичный_ключ" > /home/relay/.ssh/authorized_keys'
+sudo chown relay:relay /home/relay/.ssh/authorized_keys
+sudo chmod 600 /home/relay/.ssh/authorized_keys
+```
+
+Дайте `relay` безпарольный `sudo`, потому что автодеплой делает именно это:
+
+- при необходимости ставит Docker;
+- при необходимости ставит Docker Compose;
+- запускает Docker daemon;
+- запускает `docker compose up -d --build`.
+
+Самый простой и предсказуемый вариант для выделенного single-purpose сервера:
+
+```bash
+echo 'relay ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/90-relay-max2tg >/dev/null
+sudo chmod 440 /etc/sudoers.d/90-relay-max2tg
+sudo visudo -cf /etc/sudoers.d/90-relay-max2tg
+```
+
+Какие права важны:
+
+- `/home/relay/.ssh` -> `0700`, владелец `relay:relay`
+- `/home/relay/.ssh/authorized_keys` -> `0600`, владелец `relay:relay`
+- `/home/relay/max2tg` -> `0755`, владелец `relay:relay`
+- `/home/relay/max2tg/data` -> `0755`, владелец `relay:relay`
+- `/home/relay/max2tg/logs` -> `0755`, владелец `relay:relay`
+
+Этого достаточно. Дополнительные ACL обычно не нужны.
+
+### Шаг 3. Подготовьте `.env` для foreign relay
+
+Возьмите шаблон [.env.relay.example](./.env.relay.example) и сделайте из него, например, локальный файл `.env.relay`.
+
+Минимальный рабочий пример:
+
+```env
+APP_ROLE=tg-relay
+RELAY_SHARED_SECRET=change_me_to_a_long_random_secret
+TG_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+TG_CHAT_ID=-1001234567890
+RELAY_BIND_HOST=0.0.0.0
+RELAY_BIND_PORT=8080
+TOPIC_DB_PATH=data/topics.sqlite3
+COMMAND_DB_PATH=data/commands.sqlite3
+REPLY_ENABLED=true
+DEBUG=false
+```
+
+Что сюда писать:
+
+- `RELAY_SHARED_SECRET` -> длинную случайную строку; она должна быть одинаковой на обоих узлах
+- `TG_BOT_TOKEN` -> токен из `@BotFather`
+- `TG_CHAT_ID` -> числовой id Telegram supergroup/forum
+- `RELAY_BIND_HOST` -> оставьте `0.0.0.0`
+- `RELAY_BIND_PORT` -> обычно `8080`
+- `TOPIC_DB_PATH` -> обычно `data/topics.sqlite3`
+- `COMMAND_DB_PATH` -> обычно `data/commands.sqlite3`
+- `REPLY_ENABLED=true` -> если хотите ответы из Telegram обратно в Max
+
+Если на foreign-хосте уже занят `127.0.0.1:8080`, добавьте ещё:
+
+```env
+RELAY_HOST_PORT=18080
+```
+
+Потом закодируйте содержимое `.env.relay` в base64 одной строкой.
 
 Linux/macOS:
 
 ```bash
-base64 -w0 .env.relay.example
+base64 < .env.relay | tr -d '\n'
 ```
 
 PowerShell:
 
 ```powershell
-[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content .env.relay.example -Raw)))
+[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content .env.relay -Raw)))
 ```
 
-Полученную строку вставьте в `FOREIGN_RELAY_ENV_B64` на российском сервере.
+Сохраните результат: это значение пойдёт в `FOREIGN_RELAY_ENV_B64` на bridge-узле.
 
-### 2. Заполните env для bridge-узла
+### Шаг 4. Заполните `.env` для российского bridge-узла
 
-Скопируйте [.env.example](./.env.example) в `.env` и заполните:
+Скопируйте шаблон [.env.example](./.env.example) в `.env`:
 
 ```bash
 cp .env.example .env
 ```
 
-SSH key note for `.env` / `docker compose env_file`:
+Минимально важные поля:
+
+```env
+APP_ROLE=max-bridge
+RELAY_SHARED_SECRET=change_me_to_a_long_random_secret
+
+MAX_TOKEN=значение___oneme_auth_из_web.max.ru
+MAX_DEVICE_ID=значение___oneme_device_id_из_web.max.ru
+
+REPLY_ENABLED=true
+DEBUG=false
+
+FOREIGN_SSH_HOST=relay.example.com
+FOREIGN_SSH_PORT=22
+FOREIGN_SSH_USER=relay
+FOREIGN_SSH_PRIVATE_KEY="-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"
+FOREIGN_APP_DIR=/home/relay/max2tg
+
+REMOTE_DEPLOY_ENABLED=true
+FOREIGN_RELAY_ENV_B64=сюда_вставьте_base64_из_предыдущего_шага
+```
+
+Что куда писать:
+
+- `MAX_TOKEN` -> значение ключа `__oneme_auth` из `web.max.ru`
+- `MAX_DEVICE_ID` -> значение ключа `__oneme_device_id` из `web.max.ru`
+- `RELAY_SHARED_SECRET` -> та же строка, что и в `.env.relay`
+- `FOREIGN_SSH_HOST` -> IP или домен foreign-сервера
+- `FOREIGN_SSH_USER` -> `relay`
+- `FOREIGN_SSH_PRIVATE_KEY` -> весь приватный ключ целиком, который соответствует `/home/relay/.ssh/authorized_keys`
+- `FOREIGN_APP_DIR` -> `/home/relay/max2tg`
+- `FOREIGN_RELAY_ENV_B64` -> base64-строка из шага 3
+- `REPLY_ENABLED` -> `true`, если нужен путь `Telegram -> Max`
+- `MAX_CHAT_IDS` -> необязательно; если оставить пустым, bridge слушает все доступные чаты Max
+
+Откуда брать `MAX_TOKEN` и `MAX_DEVICE_ID`:
+
+1. Откройте `https://web.max.ru/`.
+2. Авторизуйтесь.
+3. Откройте DevTools.
+4. Перейдите в `Application -> Local Storage -> https://web.max.ru`.
+5. Скопируйте `__oneme_auth` в `MAX_TOKEN`.
+6. Скопируйте `__oneme_device_id` в `MAX_DEVICE_ID`.
+
+Примечание по SSH-ключу в `.env`:
 
 ```env
 FOREIGN_SSH_PRIVATE_KEY="-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"
 ```
 
-Raw multiline key input also works if your environment source preserves real line breaks.
+Можно и сырым многострочным значением, если источник окружения сохраняет реальные переводы строк.
 
-Главное:
+### Шаг 5. Запустите bridge-узел
 
-- `MAX_TOKEN` и `MAX_DEVICE_ID` берутся из `web.max.ru`
-- `FOREIGN_SSH_PRIVATE_KEY` содержит приватный ключ целиком
-- `RELAY_SHARED_SECRET` должен совпадать на обоих узлах
-- если на foreign-хосте уже занят `127.0.0.1:8080`, задайте `RELAY_HOST_PORT` в `.env.relay.example`
-
-### 3. Запустите bridge-узел
+На российском сервере:
 
 ```bash
 docker compose up -d --build
 ```
 
-На старте `max-bridge`:
+Что произойдёт на первом старте:
 
-1. собирает snapshot текущего репозитория;
-2. загружает его на зарубежный сервер;
-3. кладет туда foreign `.env`;
-4. при необходимости ставит Docker/Compose и запускает `docker compose up -d --build`;
-5. поднимает SSH tunnel;
-6. после успешного `/healthz` стартует Max listener.
+1. `max-bridge` соберёт snapshot текущего репозитория.
+2. По SSH загрузит его в `/home/relay/max2tg` на foreign-сервер.
+3. Положит туда `.env`, собранный из `FOREIGN_RELAY_ENV_B64`.
+4. Запустит `scripts/bootstrap_remote.sh`.
+5. Скрипт сам поставит Docker/Compose при необходимости и выполнит `docker compose up -d --build`.
+6. `max-bridge` поднимет SSH tunnel.
+7. После успешного `/healthz` начнёт слушать Max.
 
-## Режим без автодеплоя
+### Шаг 6. Проверьте, что всё поднялось
 
-Если relay уже развернут вручную, можно оставить туннель, но отключить загрузку snapshot:
+На bridge-узле:
 
-```env
-REMOTE_DEPLOY_ENABLED=false
+```bash
+docker compose logs -f
 ```
 
-В этом режиме `max-bridge` не копирует код на зарубежный сервер и только открывает SSH tunnel.
+На foreign-сервере:
 
-Если при этом relay опубликован на другом localhost-порту, укажите такой же `RELAY_HOST_PORT` и в bridge `.env`.
+```bash
+ssh relay@relay.example.com
+cd /home/relay/max2tg
+sudo docker compose ps
+sudo docker compose logs -f
+```
+
+Проверка health endpoint на foreign-сервере:
+
+```bash
+curl http://127.0.0.1:8080/healthz
+```
+
+Если вы задали `RELAY_HOST_PORT`, используйте его вместо `8080`.
+
+Признаки, что всё хорошо:
+
+- на foreign-хосте контейнер `max2tg` в статусе `Up`
+- `GET /healthz` возвращает `{"status":"ok"}`
+- новое сообщение из Max создаёт тему в Telegram
+- ответ в теме Telegram возвращается в Max, если `REPLY_ENABLED=true`
+
+## Шпаргалка по env
+
+### Bridge `.env`
+
+| Переменная | Обязательна | Что писать |
+| --- | --- | --- |
+| `APP_ROLE` | да | `max-bridge` |
+| `RELAY_SHARED_SECRET` | да | общий секрет для внутреннего API |
+| `MAX_TOKEN` | да | значение `__oneme_auth` из `web.max.ru` |
+| `MAX_DEVICE_ID` | да | значение `__oneme_device_id` из `web.max.ru` |
+| `MAX_CHAT_IDS` | нет | список chat id через запятую, если хотите слушать не всё |
+| `REPLY_ENABLED` | нет | `true` или `false` |
+| `DEBUG` | нет | `true` или `false` |
+| `RELAY_TUNNEL_LOCAL_PORT` | нет | локальный порт туннеля, обычно `18080` |
+| `RELAY_BIND_PORT` | нет | указывать только если на relay меняли bind port |
+| `RELAY_HOST_PORT` | нет | нужен при `REMOTE_DEPLOY_ENABLED=false`, если relay опубликован на другом localhost-порту |
+| `FOREIGN_SSH_HOST` | да | IP/домен foreign-сервера |
+| `FOREIGN_SSH_PORT` | нет | обычно `22` |
+| `FOREIGN_SSH_USER` | да | `relay` |
+| `FOREIGN_SSH_PRIVATE_KEY` | да | полный приватный SSH-ключ |
+| `FOREIGN_APP_DIR` | нет | обычно `/home/relay/max2tg` |
+| `REMOTE_DEPLOY_ENABLED` | нет | `true` по умолчанию |
+| `FOREIGN_RELAY_ENV_B64` | да, если `REMOTE_DEPLOY_ENABLED=true` | base64 содержимого `.env.relay` |
+
+### Relay `.env`
+
+| Переменная | Обязательна | Что писать |
+| --- | --- | --- |
+| `APP_ROLE` | да | `tg-relay` |
+| `RELAY_SHARED_SECRET` | да | тот же секрет, что и на bridge |
+| `TG_BOT_TOKEN` | да | токен Telegram-бота |
+| `TG_CHAT_ID` | да | id Telegram forum supergroup |
+| `RELAY_BIND_HOST` | нет | обычно `0.0.0.0` |
+| `RELAY_BIND_PORT` | нет | обычно `8080` |
+| `RELAY_HOST_PORT` | нет | задайте, только если `127.0.0.1:8080` на foreign-хосте уже занят |
+| `TOPIC_DB_PATH` | нет | обычно `data/topics.sqlite3` |
+| `COMMAND_DB_PATH` | нет | обычно `data/commands.sqlite3` |
+| `REPLY_ENABLED` | нет | `true`, если нужен путь `Telegram -> Max` |
+| `DEBUG` | нет | `true` или `false` |
+
+## Если не хотите давать `relay` безпарольный sudo
+
+Автоматический bootstrap в текущем виде требует `root` или `passwordless sudo` на foreign-хосте. Это не пожелание README, это прямое условие в `scripts/bootstrap_remote.sh`.
+
+Если такой доступ давать нельзя, есть рабочий обходной путь:
+
+1. Разворачивайте `tg-relay` на foreign-сервере вручную.
+2. В bridge `.env` поставьте `REMOTE_DEPLOY_ENABLED=false`.
+3. Оставьте SSH-доступ, чтобы `max-bridge` мог поднять tunnel.
+4. Если relay опубликован на нестандартном localhost-порту, задайте одинаковый `RELAY_HOST_PORT` и в relay `.env`, и в bridge `.env`.
+
+В этом режиме `max-bridge` не копирует код на foreign-сервер и не запускает bootstrap, а только открывает tunnel.
+
+## Где лежат данные
+
+На foreign-узле:
+
+- `data/topics.sqlite3` -> соответствия `Max chat <-> Telegram topic`
+- `data/commands.sqlite3` -> очередь команд `Telegram -> Max`
+- `logs/max2tg.log` -> лог контейнера внутри bind-mounted каталога `./logs`
+
+На bridge-узле локальный `topic_store` больше не используется.
 
 ## Docker
 
-Один и тот же образ используется для обеих ролей.
+Используется один и тот же образ для обеих ролей.
 
-`docker-compose.yml` всегда публикует relay-порт только на `127.0.0.1` хоста:
+`docker-compose.yml` публикует relay-порт только в `127.0.0.1` foreign-хоста:
 
 ```text
 127.0.0.1:${RELAY_HOST_PORT:-${RELAY_BIND_PORT:-8080}}:${RELAY_BIND_PORT:-8080}
 ```
 
-Поэтому `tg-relay` не торчит наружу, даже если внутри контейнера слушает `0.0.0.0`.
-По умолчанию host-port совпадает с `RELAY_BIND_PORT`, но его можно отдельно сменить через `RELAY_HOST_PORT`, если `127.0.0.1:8080` уже занят на foreign-хосте.
+То есть `tg-relay` не торчит наружу даже тогда, когда внутри контейнера слушает `0.0.0.0`.
 
 ## Внутренний API relay
 
@@ -180,14 +374,15 @@ REMOTE_DEPLOY_ENABLED=false
 X-Relay-Secret: <RELAY_SHARED_SECRET>
 ```
 
-## Хранилища
+## Обновление
 
-На relay-узле:
+Если меняете код на российском узле и `REMOTE_DEPLOY_ENABLED=true`, обычно достаточно снова выполнить:
 
-- `TOPIC_DB_PATH` — соответствия `Max chat <-> Telegram topic`
-- `COMMAND_DB_PATH` — очередь команд `Telegram -> Max`
+```bash
+docker compose up -d --build
+```
 
-На bridge-узле локальный `topic_store` больше не используется.
+На следующем старте bridge заново соберёт snapshot и перезальёт relay на foreign-хост.
 
 ## Тесты
 
@@ -198,7 +393,7 @@ python -m pytest
 Покрываются:
 
 - role-aware конфиг и валидация env;
-- batching Max -> relay;
+- batching `Max -> relay`;
 - relay HTTP API;
-- очередь Telegram -> Max;
+- очередь `Telegram -> Max`;
 - сквозной round-trip двухузловой схемы.
