@@ -60,6 +60,8 @@ Telegram topics
 - `FOREIGN_SSH_PORT`
 - `FOREIGN_APP_DIR`
 - `RELAY_TUNNEL_LOCAL_PORT`
+- `RELAY_BIND_PORT`
+- `RELAY_HOST_PORT`
 - `REMOTE_DEPLOY_ENABLED`
 
 ### `APP_ROLE=tg-relay`
@@ -76,6 +78,7 @@ Telegram topics
 
 - `RELAY_BIND_HOST`
 - `RELAY_BIND_PORT`
+- `RELAY_HOST_PORT`
 - `TOPIC_DB_PATH`
 - `COMMAND_DB_PATH`
 - `REPLY_ENABLED`
@@ -122,6 +125,7 @@ Raw multiline key input also works if your environment source preserves real lin
 - `MAX_TOKEN` и `MAX_DEVICE_ID` берутся из `web.max.ru`
 - `FOREIGN_SSH_PRIVATE_KEY` содержит приватный ключ целиком
 - `RELAY_SHARED_SECRET` должен совпадать на обоих узлах
+- если на foreign-хосте уже занят `127.0.0.1:8080`, задайте `RELAY_HOST_PORT` в `.env.relay.example`
 
 ### 3. Запустите bridge-узел
 
@@ -148,6 +152,8 @@ REMOTE_DEPLOY_ENABLED=false
 
 В этом режиме `max-bridge` не копирует код на зарубежный сервер и только открывает SSH tunnel.
 
+Если при этом relay опубликован на другом localhost-порту, укажите такой же `RELAY_HOST_PORT` и в bridge `.env`.
+
 ## Docker
 
 Один и тот же образ используется для обеих ролей.
@@ -155,10 +161,11 @@ REMOTE_DEPLOY_ENABLED=false
 `docker-compose.yml` всегда публикует relay-порт только на `127.0.0.1` хоста:
 
 ```text
-127.0.0.1:${RELAY_BIND_PORT}:${RELAY_BIND_PORT}
+127.0.0.1:${RELAY_HOST_PORT:-${RELAY_BIND_PORT:-8080}}:${RELAY_BIND_PORT:-8080}
 ```
 
 Поэтому `tg-relay` не торчит наружу, даже если внутри контейнера слушает `0.0.0.0`.
+По умолчанию host-port совпадает с `RELAY_BIND_PORT`, но его можно отдельно сменить через `RELAY_HOST_PORT`, если `127.0.0.1:8080` уже занят на foreign-хосте.
 
 ## Внутренний API relay
 
