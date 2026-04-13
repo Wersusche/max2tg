@@ -66,6 +66,7 @@ def _make_topic_update(
     chat_id: int = -100,
     user_name: str = "Alice",
     attachment=None,
+    photo=None,
 ):
     import telegram.constants
     update = MagicMock()
@@ -76,6 +77,7 @@ def _make_topic_update(
     update.message.caption = caption
     update.message.message_thread_id = thread_id
     update.message.effective_attachment = attachment
+    update.message.photo = list(photo or [])
     update.message.chat = MagicMock()
     update.message.chat.type = telegram.constants.ChatType.SUPERGROUP
     update.message.from_user = MagicMock()
@@ -382,6 +384,29 @@ class TestOnTopicMessage:
         store.close()
 
     @pytest.mark.asyncio
+    async def test_photo_without_caption_is_sent_to_max(self, tmp_path):
+        ctx, store, max_client = self._make_context(tmp_path)
+        max_client.send_photo = AsyncMock(return_value={"ok": True})
+        tg_file = MagicMock()
+        tg_file.file_path = "photos/image.jpeg"
+        tg_file.download_as_bytearray = AsyncMock(return_value=bytearray(b"image-bytes"))
+        photo = MagicMock()
+        photo.get_file = AsyncMock(return_value=tg_file)
+        update = _make_topic_update(text=None, caption=None, attachment=object(), photo=[photo], user_name="Carol")
+
+        await _on_topic_message(update, ctx)
+
+        max_client.send_message.assert_not_called()
+        max_client.send_photo.assert_awaited_once()
+        call_args = max_client.send_photo.await_args
+        assert call_args.args[0] == 42
+        assert call_args.args[1] == b"image-bytes"
+        assert "Carol" in call_args.kwargs["caption"]
+        assert call_args.kwargs["filename"] == "photo.jpg"
+        update.message.reply_text.assert_not_called()
+        store.close()
+
+    @pytest.mark.asyncio
     async def test_unknown_topic_warns_and_does_not_send(self, tmp_path):
         ctx, store, max_client = self._make_context(tmp_path, mapping=False)
         update = _make_topic_update(text="Hello")
@@ -393,13 +418,15 @@ class TestOnTopicMessage:
         store.close()
 
     @pytest.mark.asyncio
-    async def test_media_without_caption_warns_and_does_not_send(self, tmp_path):
+    async def test_unsupported_media_without_text_warns_and_does_not_send(self, tmp_path):
         ctx, store, max_client = self._make_context(tmp_path)
         update = _make_topic_update(text=None, caption=None, attachment=object())
 
         await _on_topic_message(update, ctx)
 
         max_client.send_message.assert_not_called()
+        if hasattr(max_client, "send_photo"):
+            max_client.send_photo.assert_not_called()
         update.message.reply_text.assert_called_once()
         store.close()
 
@@ -455,4 +482,35 @@ class TestRelayQueueMode:
         assert queued is not None
         assert queued.max_chat_id == "42"
         assert queued.text == "Hello"
+        command_store.close()
+
+    @pytest.mark.asyncio
+    async def test_topic_photo_enqueues_photo_command_when_command_store_present(self, tmp_path):
+        topic_store = TopicStore(str(tmp_path / "topics.sqlite3"))
+        command_store = CommandStore(str(tmp_path / "commands.sqlite3"))
+        topic_store.upsert_mapping(-100, 42, 10, "Alice")
+        ctx = _make_context(
+            bot_data={
+                "allowed_chat_id": -100,
+                "topic_store": topic_store,
+                "command_store": command_store,
+            }
+        )
+        tg_file = MagicMock()
+        tg_file.file_path = "photos/image.jpg"
+        tg_file.download_as_bytearray = AsyncMock(return_value=bytearray(b"image-bytes"))
+        photo = MagicMock()
+        photo.get_file = AsyncMock(return_value=tg_file)
+        update = _make_topic_update(text=None, caption=None, attachment=object(), photo=[photo], user_name="Bob")
+
+        await _on_topic_message(update, ctx)
+
+        queued = command_store.lease_next()
+        assert queued is not None
+        assert queued.max_chat_id == "42"
+        assert queued.kind == "photo"
+        assert queued.attachment == b"image-bytes"
+        assert queued.filename == "photo.jpg"
+        assert "Bob" in queued.text
+        topic_store.close()
         command_store.close()
