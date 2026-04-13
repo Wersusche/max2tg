@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import AsyncMock
-from app.max_client import MaxClient, MaxMessage, OpCode
+from app.max_client import MaxClient, MaxMessage, OpCode, _HTTP_HEADERS
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +276,9 @@ class TestMaxClientInit:
 
         result = c.on_disconnect(my_handler)
         assert result is my_handler
+
+    def test_http_headers_do_not_advertise_unsupported_encodings(self):
+        assert _HTTP_HEADERS["Accept-Encoding"] == "gzip, deflate"
 
 
 class TestSendHelpers:

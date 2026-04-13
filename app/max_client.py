@@ -30,7 +30,9 @@ _USER_AGENT = (
 _BROWSER_HEADERS = {
     "User-Agent": _USER_AGENT,
     "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br, zstd",
+    # aiohttp in our runtime can always handle gzip/deflate, but not
+    # brotli/zstd unless extra native dependencies are installed.
+    "Accept-Encoding": "gzip, deflate",
     "sec-ch-ua": '"Chromium";v="131", "Google Chrome";v="131", "Not?A_Brand";v="99"',
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": '"Windows"',
