@@ -109,6 +109,14 @@ PowerShell:
 cp .env.example .env
 ```
 
+SSH key note for `.env` / `docker compose env_file`:
+
+```env
+FOREIGN_SSH_PRIVATE_KEY="-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"
+```
+
+Raw multiline key input also works if your environment source preserves real line breaks.
+
 Главное:
 
 - `MAX_TOKEN` и `MAX_DEVICE_ID` берутся из `web.max.ru`

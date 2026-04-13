@@ -1,6 +1,7 @@
 import base64
 import binascii
 import os
+import re
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -8,6 +9,7 @@ from dotenv import load_dotenv
 APP_ROLE_MAX_BRIDGE = "max-bridge"
 APP_ROLE_TG_RELAY = "tg-relay"
 APP_ROLES = {APP_ROLE_MAX_BRIDGE, APP_ROLE_TG_RELAY}
+_PRIVATE_KEY_MARKER_RE = re.compile(r"^-----(BEGIN|END) ([A-Z0-9 ]+PRIVATE KEY)-----$")
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,47 @@ def _reject_present(env: dict[str, str], names: list[str], *, role: str) -> None
         )
 
 
+def _normalize_ssh_private_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    normalized = value.strip()
+    if not normalized:
+        return ""
+
+    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+    if "\n" not in normalized:
+        normalized = normalized.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+
+    return normalized.rstrip("\n") + "\n"
+
+
+def _validate_ssh_private_key(value: str | None) -> None:
+    if value is None:
+        return
+
+    non_empty_lines = [line.strip() for line in value.splitlines() if line.strip()]
+    if len(non_empty_lines) < 3:
+        raise SystemExit(
+            "FOREIGN_SSH_PRIVATE_KEY must contain a complete private key with BEGIN/END PRIVATE KEY markers"
+        )
+
+    begin_match = _PRIVATE_KEY_MARKER_RE.fullmatch(non_empty_lines[0])
+    end_match = _PRIVATE_KEY_MARKER_RE.fullmatch(non_empty_lines[-1])
+    if begin_match is None or begin_match.group(1) != "BEGIN":
+        raise SystemExit(
+            "FOREIGN_SSH_PRIVATE_KEY must contain a complete private key with BEGIN/END PRIVATE KEY markers"
+        )
+    if end_match is None or end_match.group(1) != "END":
+        raise SystemExit(
+            "FOREIGN_SSH_PRIVATE_KEY must contain a complete private key with BEGIN/END PRIVATE KEY markers"
+        )
+    if begin_match.group(2) != end_match.group(2):
+        raise SystemExit(
+            "FOREIGN_SSH_PRIVATE_KEY must contain matching BEGIN/END PRIVATE KEY markers"
+        )
+
+
 def load_settings() -> Settings:
     load_dotenv()
     env = dict(os.environ)
@@ -112,7 +155,7 @@ def load_settings() -> Settings:
         foreign_ssh_host=env.get("FOREIGN_SSH_HOST") or None,
         foreign_ssh_port=_env_int("FOREIGN_SSH_PORT", 22),
         foreign_ssh_user=env.get("FOREIGN_SSH_USER") or None,
-        foreign_ssh_private_key=env.get("FOREIGN_SSH_PRIVATE_KEY") or None,
+        foreign_ssh_private_key=_normalize_ssh_private_key(env.get("FOREIGN_SSH_PRIVATE_KEY") or None),
         foreign_app_dir=env.get("FOREIGN_APP_DIR") or "/opt/max2tg-relay",
         remote_deploy_enabled=_env_flag("REMOTE_DEPLOY_ENABLED", default=True),
         foreign_relay_env_b64=env.get("FOREIGN_RELAY_ENV_B64") or None,
@@ -127,6 +170,7 @@ def load_settings() -> Settings:
             ["TG_BOT_TOKEN", "TG_CHAT_ID", "TOPIC_DB_PATH", "COMMAND_DB_PATH"],
             role=settings.app_role,
         )
+        _validate_ssh_private_key(settings.foreign_ssh_private_key)
         _validate_base64_env(settings.foreign_relay_env_b64)
         return settings
 
