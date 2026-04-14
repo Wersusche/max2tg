@@ -25,6 +25,20 @@ def _is_missing_topic_error(exc: BadRequest) -> bool:
     ) or ("topic" in text and ("not found" in text or "deleted" in text))
 
 
+def _get_existing_max_mapping(
+    message_store: MessageStore,
+    *,
+    max_chat_id: Any,
+    max_message_id: str | None,
+):
+    if not max_message_id:
+        return None
+    return message_store.get_by_max_message(
+        max_chat_id=max_chat_id,
+        max_message_id=max_message_id,
+    )
+
+
 class RelayBatchProcessor:
     def __init__(self, sender: TelegramSender, topic_router: TopicRouter, message_store: MessageStore):
         self.sender = sender
@@ -37,6 +51,19 @@ class RelayBatchProcessor:
         attachments: dict[str, bytes] | None = None,
     ) -> None:
         attachments = attachments or {}
+        existing_mapping = _get_existing_max_mapping(
+            self.message_store,
+            max_chat_id=batch.max_chat_id,
+            max_message_id=batch.max_message_id,
+        )
+        if existing_mapping is not None:
+            log.info(
+                "Skipping duplicate Max message chat=%s message_id=%s existing_tg_message_id=%s",
+                batch.max_chat_id,
+                batch.max_message_id,
+                existing_mapping.tg_message_id,
+            )
+            return
         if not batch.topic_name:
             mapped_message_id = await self._send_operations(
                 batch.operations,
@@ -160,7 +187,7 @@ class RelayBatchProcessor:
         message_thread_id: int | None,
         tg_message_id: int | None,
     ) -> None:
-        if batch.max_message_id is None or tg_message_id is None or batch.max_chat_id == "__system__":
+        if not batch.max_message_id or tg_message_id is None or batch.max_chat_id == "__system__":
             return
         self.message_store.upsert_mapping(
             tg_chat_id=int(self.sender.chat_id),

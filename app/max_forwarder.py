@@ -398,6 +398,20 @@ async def _resolve_reply_to_message_id(
     return mapping.tg_message_id
 
 
+def _get_existing_max_mapping(
+    message_store: MessageStore | None,
+    *,
+    max_chat_id: Any,
+    max_message_id: str,
+):
+    if message_store is None or not max_message_id:
+        return None
+    return message_store.get_by_max_message(
+        max_chat_id=max_chat_id,
+        max_message_id=max_message_id,
+    )
+
+
 def _store_message_mapping(
     message_store: MessageStore | None,
     *,
@@ -515,6 +529,20 @@ async def forward_max_message(
     )
 
     if msg.is_self:
+        return
+
+    existing_mapping = _get_existing_max_mapping(
+        message_store,
+        max_chat_id=msg.chat_id,
+        max_message_id=msg.message_id,
+    )
+    if existing_mapping is not None:
+        log.info(
+            "Skipping duplicate Max message chat=%s message_id=%s existing_tg_message_id=%s",
+            msg.chat_id,
+            msg.message_id,
+            existing_mapping.tg_message_id,
+        )
         return
 
     sender_name = await resolver.resolve_user(msg.sender_id)

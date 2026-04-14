@@ -172,3 +172,79 @@ async def test_relay_stores_message_mapping_and_exposes_lookup(tmp_path):
         topic_store.close()
         command_store.close()
         message_store.close()
+
+
+@pytest.mark.asyncio
+async def test_relay_skips_duplicate_max_message_id(tmp_path):
+    client, sender, topic_store, command_store, message_store = await _make_client(tmp_path)
+    sender.send = AsyncMock(return_value=SimpleNamespace(message_id=7001))
+    try:
+        batch = TelegramBatch(
+            max_chat_id="42",
+            topic_name="Alice",
+            max_message_id="max-42",
+            operations=[RelayOperation(kind="text", text="Hello from Max")],
+        )
+
+        first = await client.post(
+            "/internal/telegram-batch",
+            json=batch.to_dict(),
+            headers={"X-Relay-Secret": "secret"},
+        )
+        second = await client.post(
+            "/internal/telegram-batch",
+            json=batch.to_dict(),
+            headers={"X-Relay-Secret": "secret"},
+        )
+
+        assert first.status == 200
+        assert second.status == 200
+        assert sender.send.await_count == 1
+
+        stored = message_store.get_by_max_message(max_chat_id=42, max_message_id="max-42")
+        assert stored is not None
+        assert stored.tg_message_id == 7001
+    finally:
+        await client.close()
+        topic_store.close()
+        command_store.close()
+        message_store.close()
+
+
+@pytest.mark.asyncio
+async def test_relay_does_not_deduplicate_empty_max_message_id(tmp_path):
+    client, sender, topic_store, command_store, message_store = await _make_client(tmp_path)
+    sender.send = AsyncMock(
+        side_effect=[
+            SimpleNamespace(message_id=7001),
+            SimpleNamespace(message_id=7002),
+        ]
+    )
+    try:
+        batch = TelegramBatch(
+            max_chat_id="42",
+            topic_name="Alice",
+            max_message_id="",
+            operations=[RelayOperation(kind="text", text="Hello from Max")],
+        )
+
+        first = await client.post(
+            "/internal/telegram-batch",
+            json=batch.to_dict(),
+            headers={"X-Relay-Secret": "secret"},
+        )
+        second = await client.post(
+            "/internal/telegram-batch",
+            json=batch.to_dict(),
+            headers={"X-Relay-Secret": "secret"},
+        )
+
+        assert first.status == 200
+        assert second.status == 200
+        assert sender.send.await_count == 2
+        assert message_store.get_by_max_message(max_chat_id=42, max_message_id="") is None
+    finally:
+        await client.close()
+        topic_store.close()
+        command_store.close()
+        message_store.close()
