@@ -114,24 +114,43 @@ class MessageStore:
         *,
         max_chat_id: Any,
         max_message_id: Any,
-        direction: str = "max_to_tg",
+        direction: str | None = "max_to_tg",
     ) -> MessageMapping | None:
         with self._lock:
-            row = self._conn.execute(
-                """
-                SELECT
-                    tg_chat_id,
-                    max_chat_id,
-                    max_message_id,
-                    tg_message_id,
-                    message_thread_id,
-                    direction,
-                    source
-                FROM message_mappings
-                WHERE direction = ? AND max_chat_id = ? AND max_message_id = ?
-                """,
-                (str(direction), str(max_chat_id), str(max_message_id)),
-            ).fetchone()
+            if direction is None:
+                row = self._conn.execute(
+                    """
+                    SELECT
+                        tg_chat_id,
+                        max_chat_id,
+                        max_message_id,
+                        tg_message_id,
+                        message_thread_id,
+                        direction,
+                        source
+                    FROM message_mappings
+                    WHERE max_chat_id = ? AND max_message_id = ?
+                    ORDER BY updated_at DESC, created_at DESC
+                    LIMIT 1
+                    """,
+                    (str(max_chat_id), str(max_message_id)),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    """
+                    SELECT
+                        tg_chat_id,
+                        max_chat_id,
+                        max_message_id,
+                        tg_message_id,
+                        message_thread_id,
+                        direction,
+                        source
+                    FROM message_mappings
+                    WHERE direction = ? AND max_chat_id = ? AND max_message_id = ?
+                    """,
+                    (str(direction), str(max_chat_id), str(max_message_id)),
+                ).fetchone()
         return self._row_to_mapping(row)
 
     def get_by_tg_message(

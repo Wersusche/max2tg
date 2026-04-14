@@ -297,6 +297,16 @@ class TestSendHelpers:
         assert payload["message"]["attaches"] == [{"_type": "PHOTO"}]
 
     @pytest.mark.asyncio
+    async def test_send_message_passes_native_reply_link_when_present(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client.cmd = AsyncMock(return_value={"ok": True})
+
+        await client.send_message(42, "hello", reply_to_max_message_id="max-1")
+
+        payload = client.cmd.await_args.args[1]
+        assert payload["message"]["link"] == {"type": "REPLY", "mid": "max-1"}
+
+    @pytest.mark.asyncio
     async def test_send_photo_uploads_and_sends_attach(self):
         client = MaxClient(token="tok", device_id="dev")
         client.upload_photo = AsyncMock(return_value={"_type": "PHOTO", "photoToken": "abc"})
@@ -310,6 +320,7 @@ class TestSendHelpers:
             "hello",
             [{"type": "STRONG"}],
             attaches=[{"_type": "PHOTO", "photoToken": "abc"}],
+            reply_to_max_message_id=None,
         )
 
     @pytest.mark.asyncio
@@ -332,7 +343,14 @@ class TestSendHelpers:
             "hello",
             [{"type": "STRONG"}],
             attaches=[{"_type": "FILE", "fileToken": "abc", "name": "report.pdf"}],
+            reply_to_max_message_id=None,
         )
+
+    def test_extract_sent_message_id_prefers_nested_message_payload(self):
+        assert MaxClient.extract_sent_message_id({"message": {"id": "max-7"}, "id": "outer"}) == "max-7"
+
+    def test_extract_sent_message_id_accepts_mid_fallback(self):
+        assert MaxClient.extract_sent_message_id({"mid": "max-8"}) == "max-8"
 
 
 class TestDispatchQueue:

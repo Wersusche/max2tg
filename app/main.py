@@ -85,6 +85,7 @@ async def _relay_command_loop(relay_client: RelayClient, max_client) -> None:
                     caption=command.text,
                     elements=command.elements,
                     filename=command.filename or "photo.jpg",
+                    reply_to_max_message_id=command.reply_to_max_message_id,
                 )
             elif command.kind == "document":
                 response = await max_client.send_document(
@@ -93,14 +94,35 @@ async def _relay_command_loop(relay_client: RelayClient, max_client) -> None:
                     caption=command.text,
                     elements=command.elements,
                     filename=command.filename or "file",
+                    reply_to_max_message_id=command.reply_to_max_message_id,
                 )
             else:
                 response = await max_client.send_message(
                     max_chat_id,
                     command.text,
                     command.elements,
+                    reply_to_max_message_id=command.reply_to_max_message_id,
                 )
             if response:
+                if command.tg_chat_id is not None and command.tg_message_id is not None:
+                    max_message_id = max_client.extract_sent_message_id(response)
+                    if max_message_id:
+                        try:
+                            await relay_client.upsert_message_mapping(
+                                tg_chat_id=command.tg_chat_id,
+                                tg_message_id=command.tg_message_id,
+                                max_chat_id=command.max_chat_id,
+                                max_message_id=max_message_id,
+                                message_thread_id=command.message_thread_id,
+                                direction="tg_to_max",
+                                source="telegram",
+                            )
+                        except Exception:
+                            log.exception(
+                                "Failed to store Telegram->Max mapping for tg_message_id=%s max_message_id=%s",
+                                command.tg_message_id,
+                                max_message_id,
+                            )
                 await relay_client.ack_command(command.id)
             else:
                 log.warning("Max rejected queued command id=%s chat=%s", command.id, command.max_chat_id)
@@ -220,6 +242,7 @@ async def _run_tg_relay(settings) -> None:
             settings.tg_chat_id,
             topic_store,
             command_store=command_store,
+            message_store=message_store,
         )
         await tg_app.initialize()
         await tg_app.start()

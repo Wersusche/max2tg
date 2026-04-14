@@ -37,3 +37,23 @@ def test_lookup_by_tg_message(tmp_path):
     assert loaded.max_message_id == "max-2"
     assert loaded.message_thread_id == 56
     store.close()
+
+
+def test_lookup_by_max_message_without_direction_finds_tg_to_max(tmp_path):
+    store = _make_store(tmp_path)
+    store.upsert_mapping(
+        tg_chat_id=-100,
+        max_chat_id=42,
+        max_message_id="max-3",
+        tg_message_id=7003,
+        message_thread_id=57,
+        direction="tg_to_max",
+        source="telegram",
+    )
+
+    loaded = store.get_by_max_message(max_chat_id=42, max_message_id="max-3", direction=None)
+
+    assert loaded is not None
+    assert loaded.direction == "tg_to_max"
+    assert loaded.tg_message_id == 7003
+    store.close()

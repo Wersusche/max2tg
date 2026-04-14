@@ -125,6 +125,34 @@ class RelayClient:
                 return None
             return int(raw_message_id)
 
+    async def upsert_message_mapping(
+        self,
+        *,
+        tg_chat_id: int,
+        tg_message_id: int,
+        max_chat_id: Any,
+        max_message_id: Any,
+        message_thread_id: int | None = None,
+        direction: str = "tg_to_max",
+        source: str = "telegram",
+    ) -> None:
+        session = await self._get_session()
+        async with session.post(
+            f"{self.base_url}/internal/message-mappings/upsert",
+            json={
+                "tg_chat_id": int(tg_chat_id),
+                "tg_message_id": int(tg_message_id),
+                "max_chat_id": str(max_chat_id),
+                "max_message_id": str(max_message_id),
+                "message_thread_id": int(message_thread_id) if message_thread_id is not None else None,
+                "direction": str(direction),
+                "source": str(source),
+            },
+            headers={SECRET_HEADER: self.shared_secret},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            await _raise_for_status(resp)
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()

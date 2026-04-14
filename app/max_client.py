@@ -288,7 +288,14 @@ class MaxClient:
         log.info("fetch_contacts(%s) -> keys: %s", contact_ids, list(resp.keys()))
         return resp
 
-    async def send_message(self, chat_id, text: str, elements=None, attaches=None) -> dict:
+    async def send_message(
+        self,
+        chat_id,
+        text: str,
+        elements=None,
+        attaches=None,
+        reply_to_max_message_id: str | None = None,
+    ) -> dict:
         """Send a message to a Max chat."""
         if elements is None:
             elements = []
@@ -298,6 +305,8 @@ class MaxClient:
         message = {"text": text, "cid": cid, "elements": elements}
         if attaches:
             message["attaches"] = attaches
+        if reply_to_max_message_id is not None:
+            message["link"] = {"type": "REPLY", "mid": str(reply_to_max_message_id)}
         resp = await self.cmd(
             OpCode.SEND_MESSAGE,
             {
@@ -316,6 +325,7 @@ class MaxClient:
         caption: str = "",
         elements=None,
         filename: str = "photo.jpg",
+        reply_to_max_message_id: str | None = None,
     ) -> dict:
         """Upload a photo and send it to a Max chat."""
         if not data:
@@ -325,7 +335,13 @@ class MaxClient:
         attach = await self.upload_photo(chat_id, data, filename=filename)
         if not attach:
             return {}
-        return await self.send_message(chat_id, caption, elements, attaches=[attach])
+        return await self.send_message(
+            chat_id,
+            caption,
+            elements,
+            attaches=[attach],
+            reply_to_max_message_id=reply_to_max_message_id,
+        )
 
     async def send_document(
         self,
@@ -334,6 +350,7 @@ class MaxClient:
         caption: str = "",
         elements=None,
         filename: str = "file",
+        reply_to_max_message_id: str | None = None,
     ) -> dict:
         """Upload a document and send it to a Max chat."""
         if not data:
@@ -343,7 +360,13 @@ class MaxClient:
         attach = await self.upload_document(chat_id, data, filename=filename)
         if not attach:
             return {}
-        return await self.send_message(chat_id, caption, elements, attaches=[attach])
+        return await self.send_message(
+            chat_id,
+            caption,
+            elements,
+            attaches=[attach],
+            reply_to_max_message_id=reply_to_max_message_id,
+        )
 
     async def upload_photo(self, chat_id, data: bytes, filename: str = "photo.jpg") -> dict:
         """Upload photo bytes to Max and return attach payload for send_message."""
@@ -565,4 +588,26 @@ class MaxClient:
         nested_file = payload.get("payload")
         if isinstance(nested_file, dict):
             return MaxClient._extract_upload_token(nested_file, container_keys=container_keys)
+        return None
+
+    @staticmethod
+    def extract_sent_message_id(payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+
+        message_payload = payload.get("message")
+        candidates: list[Any] = []
+        if isinstance(message_payload, dict):
+            candidates.extend(
+                (
+                    message_payload.get("id"),
+                    message_payload.get("mid"),
+                    message_payload.get("messageId"),
+                )
+            )
+        candidates.extend((payload.get("id"), payload.get("mid"), payload.get("messageId")))
+
+        for candidate in candidates:
+            if candidate is not None and str(candidate):
+                return str(candidate)
         return None
