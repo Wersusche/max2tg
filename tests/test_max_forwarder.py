@@ -6,6 +6,7 @@ import pytest
 from app.max_client import MaxMessage
 from app.max_forwarder import forward_max_message
 from app.message_store import MessageStore
+from app.resolver import ContactResolver
 
 
 def _make_sender(*, message_ids: list[int]):
@@ -129,5 +130,30 @@ async def test_forward_max_reply_uses_tg_to_max_mapping_for_native_reply(tmp_pat
 
         assert sender.send.await_count == 1
         assert sender.send.await_args.kwargs["reply_to_message_id"] == 7001
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_forward_max_message_uses_display_name_after_string_contact_resolution(tmp_path):
+    sender = _make_sender(message_ids=[7001])
+    resolver = ContactResolver()
+    resolver._parse_contacts_response({"contacts": [{"id": "7", "firstName": "Alice"}]})
+    resolver.chat_types[42] = "DIALOG"
+    client = SimpleNamespace(download_file=AsyncMock(return_value=None))
+    store = MessageStore(str(tmp_path / "messages.sqlite3"))
+
+    try:
+        await forward_max_message(
+            MaxMessage(chat_id=42, sender_id=7, text="Hello from Max", message_id="max-1"),
+            client=client,
+            sender=sender,
+            resolver=resolver,
+            message_store=store,
+        )
+
+        payload = sender.send.await_args.args[0]
+        assert "<b>Alice</b>" in payload
+        assert "<b>7</b>" not in payload
     finally:
         store.close()

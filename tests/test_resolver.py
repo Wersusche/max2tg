@@ -1,5 +1,8 @@
 """Tests for app/resolver.py — ContactResolver."""
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 from app.resolver import ContactResolver
 
@@ -360,3 +363,35 @@ class TestResolveUser:
         assert first_result == "77"
         assert second_result == "Fetched User"
         assert attempts == 2
+
+    @pytest.mark.asyncio
+    async def test_resolves_user_when_contact_response_uses_string_id(self):
+        resolver = ContactResolver(
+            client=SimpleNamespace(
+                fetch_contacts=AsyncMock(
+                    return_value={"contacts": [{"id": "77", "firstName": "Fetched", "lastName": "User"}]}
+                )
+            )
+        )
+
+        result = await resolver.resolve_user(77)
+
+        assert result == "Fetched User"
+        assert resolver.user_name("77") == "Fetched User"
+        assert resolver._is_fetch_failed(77) is False
+
+    @pytest.mark.asyncio
+    async def test_batch_resolve_normalizes_string_ids_without_marking_fetch_failed(self):
+        client = SimpleNamespace(
+            fetch_contacts=AsyncMock(
+                return_value={"contacts": [{"userId": "77", "firstName": "Batch", "lastName": "User"}]}
+            )
+        )
+        resolver = ContactResolver(client=client)
+
+        await resolver.resolve_users_batch([77, "77"])
+
+        client.fetch_contacts.assert_awaited_once_with([77])
+        assert resolver.user_name(77) == "Batch User"
+        assert resolver.user_name("77") == "Batch User"
+        assert resolver._is_fetch_failed(77) is False

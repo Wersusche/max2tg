@@ -33,11 +33,14 @@ def create_max_client(
     first_connect = True
     notification_count = 0
     last_notification_at: datetime | None = None
+    ready_count = 0
+    outage_started_at: datetime | None = None
+    outage_handled = False
 
-    def can_notify() -> bool:
+    def can_notify(now: datetime) -> bool:
         if last_notification_at is None:
             return True
-        elapsed = (datetime.now() - last_notification_at).total_seconds()
+        elapsed = (now - last_notification_at).total_seconds()
         if notification_count == 1:
             return elapsed >= 3600
         if notification_count == 2:
@@ -46,7 +49,19 @@ def create_max_client(
 
     @client.on_ready
     async def handle_ready(snapshot: dict) -> None:
-        nonlocal first_connect
+        nonlocal first_connect, ready_count, outage_started_at, outage_handled
+
+        now = datetime.now()
+        ready_count += 1
+        if outage_started_at is None:
+            log.info("Max ready event #%d received without an active outage", ready_count)
+        else:
+            log.info(
+                "Max ready event #%d received after outage %.1fs (notification_count=%d)",
+                ready_count,
+                (now - outage_started_at).total_seconds(),
+                notification_count,
+            )
 
         participant_ids = resolver.load_snapshot(snapshot)
         if participant_ids:
@@ -56,22 +71,40 @@ def create_max_client(
             log.info("Known chats: %s", resolver.chats)
             log.info("Known users: %s", resolver.users)
 
-        if not first_connect:
-            await sender.send("✅ <b>Max:</b> соединение восстановлено")
+        if first_connect:
+            await sender.send("✅ <b>Max:</b> подключён | чатов: %d" % len(resolver.chats))
         else:
-            await sender.send(f"✅ <b>Max:</b> подключён | чатов: {len(resolver.chats)}")
+            log.info("Reconnect completed without Telegram notification")
+
         first_connect = False
+        outage_started_at = None
+        outage_handled = False
 
     @client.on_disconnect
     async def handle_disconnect() -> None:
-        nonlocal notification_count, last_notification_at
+        nonlocal notification_count, last_notification_at, outage_started_at, outage_handled
 
-        if not can_notify():
+        now = datetime.now()
+        if outage_started_at is None:
+            outage_started_at = now
+            log.warning("Max connection transitioned to disconnected state")
+        else:
+            log.info(
+                "Additional disconnect callback while outage is active (elapsed=%.1fs)",
+                (now - outage_started_at).total_seconds(),
+            )
+
+        if outage_handled:
+            log.info("Disconnect notification suppressed (active outage already handled)")
+            return
+
+        outage_handled = True
+        if not can_notify(now):
             log.info("Disconnect notification suppressed (throttle)")
             return
 
         notification_count += 1
-        last_notification_at = datetime.now()
+        last_notification_at = now
         await sender.send("⚠️ <b>Max:</b> соединение потеряно, переподключение...")
 
     @client.on_message
