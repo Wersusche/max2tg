@@ -24,9 +24,12 @@ def _make_replied_message(
     attachment=None,
     photo=None,
     document=None,
+    thread_id: int | None = None,
+    forum_topic_created=None,
 ):
     replied = MagicMock()
     replied.message_id = message_id
+    replied.message_thread_id = thread_id
     replied.text = text
     replied.caption = caption
     replied.effective_attachment = attachment
@@ -35,6 +38,7 @@ def _make_replied_message(
     replied.video = None
     replied.voice = None
     replied.sticker = None
+    replied.forum_topic_created = forum_topic_created
     return replied
 
 
@@ -176,6 +180,29 @@ class TestOnTopicMessage:
         assert call_args.kwargs["reply_to_max_message_id"] is None
         assert "↪ Original Telegram message" in call_args.args[1]
         assert "Reply text" in call_args.args[1]
+        topic_store.close()
+        message_store.close()
+
+    @pytest.mark.asyncio
+    async def test_topic_root_service_reply_is_ignored_for_regular_message(self, tmp_path):
+        ctx, topic_store, message_store, max_client = self._make_context(tmp_path)
+        update = _make_topic_update(
+            text="Hello",
+            user_name="Bob",
+            reply_to_message=_make_replied_message(
+                message_id=10,
+                text=None,
+                thread_id=10,
+                forum_topic_created=object(),
+            ),
+        )
+
+        await _on_topic_message(update, ctx)
+
+        call_args = max_client.send_message.await_args
+        assert call_args.kwargs["reply_to_max_message_id"] is None
+        assert "\u21aa" not in call_args.args[1]
+        assert call_args.args[1] == "\U0001F4AC Bob:\nHello"
         topic_store.close()
         message_store.close()
 
@@ -420,6 +447,43 @@ class TestRelayQueueMode:
         assert queued is not None
         assert queued.reply_to_max_message_id is None
         assert "↪ Original" in queued.text
+        topic_store.close()
+        command_store.close()
+        message_store.close()
+
+    @pytest.mark.asyncio
+    async def test_topic_root_service_reply_is_ignored_when_enqueuing_command(self, tmp_path):
+        topic_store = TopicStore(str(tmp_path / "topics.sqlite3"))
+        command_store = CommandStore(str(tmp_path / "commands.sqlite3"))
+        message_store = MessageStore(str(tmp_path / "messages.sqlite3"))
+        topic_store.upsert_mapping(-100, 42, 10, "Alice")
+        ctx = _make_context(
+            bot_data={
+                "allowed_chat_id": -100,
+                "topic_store": topic_store,
+                "message_store": message_store,
+                "command_store": command_store,
+            }
+        )
+        update = _make_topic_update(
+            text="Hello",
+            user_name="Bob",
+            message_id=9001,
+            reply_to_message=_make_replied_message(
+                message_id=10,
+                text=None,
+                thread_id=10,
+                forum_topic_created=object(),
+            ),
+        )
+
+        await _on_topic_message(update, ctx)
+
+        queued = command_store.lease_next()
+        assert queued is not None
+        assert queued.reply_to_max_message_id is None
+        assert "\u21aa" not in queued.text
+        assert queued.text == "\U0001F4AC Bob:\nHello"
         topic_store.close()
         command_store.close()
         message_store.close()
