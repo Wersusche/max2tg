@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 
 import telegram.constants
 from telegram import Update
@@ -7,6 +8,7 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 from app.command_store import CommandStore
 from app.max_client import MaxClient
+from app.message_store import MessageStore
 from app.topic_store import TopicStore
 
 log = logging.getLogger(__name__)
@@ -14,6 +16,7 @@ log = logging.getLogger(__name__)
 _ALLOWED_CHAT_ID_KEY = "allowed_chat_id"
 _TOPIC_STORE_KEY = "topic_store"
 _COMMAND_STORE_KEY = "command_store"
+_MESSAGE_STORE_KEY = "message_store"
 
 
 def _parse_max_chat_id(value: str):
@@ -28,6 +31,19 @@ def _message_text_or_caption(update: Update) -> str | None:
     if not message:
         return None
     return message.text or message.caption
+
+
+def _shift_elements(elements: list[dict], offset: int) -> list[dict]:
+    if offset <= 0:
+        return list(elements)
+
+    shifted: list[dict] = []
+    for element in elements:
+        shifted_element = dict(element)
+        if isinstance(shifted_element.get("from"), int):
+            shifted_element["from"] = int(shifted_element["from"]) + offset
+        shifted.append(shifted_element)
+    return shifted
 
 
 def _decorate_outbound_text(
@@ -61,6 +77,103 @@ def _has_photo(message) -> bool:
 
 def _has_document(message) -> bool:
     return getattr(message, "document", None) is not None
+
+
+def _truncate_preview(text: str, limit: int = 120) -> str:
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _build_reply_preview(message) -> str:
+    text = getattr(message, "text", None) or getattr(message, "caption", None)
+    if text:
+        return _truncate_preview(str(text))
+
+    if _has_photo(message):
+        return "[фото]"
+
+    document = getattr(message, "document", None)
+    if document is not None:
+        file_name = getattr(document, "file_name", None)
+        if file_name:
+            return f"[файл: {file_name}]"
+        return "[файл]"
+
+    if getattr(message, "video", None) is not None:
+        return "[видео]"
+    if getattr(message, "voice", None) is not None:
+        return "[голосовое]"
+    if getattr(message, "sticker", None) is not None:
+        return "[стикер]"
+    if getattr(message, "effective_attachment", None) is not None:
+        return "[вложение]"
+    return "[сообщение]"
+
+
+def _apply_reply_fallback_prefix(
+    text: str,
+    elements: list[dict],
+    reply_preview: str | None,
+) -> tuple[str, list[dict]]:
+    if not reply_preview:
+        return text, list(elements)
+
+    prefix = f"↪ {reply_preview}\n"
+    return prefix + text, _shift_elements(elements, len(prefix))
+
+
+def _resolve_reply_target(
+    *,
+    message,
+    message_store: MessageStore | None,
+    tg_chat_id: int,
+    current_max_chat_id: str,
+) -> tuple[str | None, str | None]:
+    replied_message = getattr(message, "reply_to_message", None)
+    if replied_message is None:
+        return None, None
+
+    tg_message_id = getattr(replied_message, "message_id", None)
+    if tg_message_id is None or message_store is None:
+        return None, _build_reply_preview(replied_message)
+
+    mapping = message_store.get_by_tg_message(
+        tg_chat_id=tg_chat_id,
+        tg_message_id=int(tg_message_id),
+    )
+    if mapping is None or mapping.max_chat_id != str(current_max_chat_id):
+        return None, _build_reply_preview(replied_message)
+
+    return mapping.max_message_id, None
+
+
+def _store_direct_message_mapping(
+    *,
+    message_store: MessageStore | None,
+    tg_chat_id: int,
+    tg_message_id: int | None,
+    max_chat_id: str,
+    message_thread_id: int | None,
+    response: dict | None,
+) -> None:
+    if message_store is None or tg_message_id is None:
+        return
+
+    max_message_id = MaxClient.extract_sent_message_id(response)
+    if not max_message_id:
+        return
+
+    message_store.upsert_mapping(
+        tg_chat_id=tg_chat_id,
+        max_chat_id=max_chat_id,
+        max_message_id=max_message_id,
+        tg_message_id=tg_message_id,
+        message_thread_id=message_thread_id,
+        direction="tg_to_max",
+        source="telegram",
+    )
 
 
 def _guess_photo_filename(telegram_file) -> str:
@@ -140,12 +253,20 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     max_client: MaxClient | None = context.bot_data.get("max_client")
     command_store: CommandStore | None = context.bot_data.get(_COMMAND_STORE_KEY)
+    message_store: MessageStore | None = context.bot_data.get(_MESSAGE_STORE_KEY)
     if not max_client and not command_store:
         await message.reply_text("⚠️ Max клиент не подключён.")
         return
 
     text = _message_text_or_caption(update)
     parsed_max_chat_id = _parse_max_chat_id(mapping.max_chat_id)
+    reply_to_max_message_id, reply_fallback_preview = _resolve_reply_target(
+        message=message,
+        message_store=message_store,
+        tg_chat_id=int(allowed_chat_id),
+        current_max_chat_id=str(mapping.max_chat_id),
+    )
+    outbound_tg_message_id = getattr(message, "message_id", None)
 
     try:
         if _has_photo(message):
@@ -159,6 +280,11 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 text,
                 include_sender_when_empty=True,
             )
+            caption, elements = _apply_reply_fallback_prefix(
+                caption,
+                elements,
+                reply_fallback_preview,
+            )
             if max_client:
                 resp = await max_client.send_photo(
                     parsed_max_chat_id,
@@ -166,6 +292,15 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     caption=caption,
                     elements=elements,
                     filename=filename,
+                    reply_to_max_message_id=reply_to_max_message_id,
+                )
+                _store_direct_message_mapping(
+                    message_store=message_store,
+                    tg_chat_id=int(allowed_chat_id),
+                    tg_message_id=outbound_tg_message_id,
+                    max_chat_id=str(mapping.max_chat_id),
+                    message_thread_id=int(message_thread_id),
+                    response=resp,
                 )
             else:
                 command_store.enqueue_photo(
@@ -174,6 +309,10 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     caption=caption,
                     elements=elements,
                     filename=filename,
+                    reply_to_max_message_id=reply_to_max_message_id,
+                    tg_chat_id=int(allowed_chat_id),
+                    tg_message_id=outbound_tg_message_id,
+                    message_thread_id=int(message_thread_id),
                 )
                 resp = {"queued": True}
             if not resp:
@@ -191,6 +330,11 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 text,
                 include_sender_when_empty=True,
             )
+            caption, elements = _apply_reply_fallback_prefix(
+                caption,
+                elements,
+                reply_fallback_preview,
+            )
             if max_client:
                 resp = await max_client.send_document(
                     parsed_max_chat_id,
@@ -198,6 +342,15 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     caption=caption,
                     elements=elements,
                     filename=filename,
+                    reply_to_max_message_id=reply_to_max_message_id,
+                )
+                _store_direct_message_mapping(
+                    message_store=message_store,
+                    tg_chat_id=int(allowed_chat_id),
+                    tg_message_id=outbound_tg_message_id,
+                    max_chat_id=str(mapping.max_chat_id),
+                    message_thread_id=int(message_thread_id),
+                    response=resp,
                 )
             else:
                 command_store.enqueue_document(
@@ -206,6 +359,10 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     caption=caption,
                     elements=elements,
                     filename=filename,
+                    reply_to_max_message_id=reply_to_max_message_id,
+                    tg_chat_id=int(allowed_chat_id),
+                    tg_message_id=outbound_tg_message_id,
+                    message_thread_id=int(message_thread_id),
                 )
                 resp = {"queued": True}
             if not resp:
@@ -218,10 +375,32 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
 
         text, elements = _decorate_outbound_text(message, text)
+        text, elements = _apply_reply_fallback_prefix(text, elements, reply_fallback_preview)
         if max_client:
-            resp = await max_client.send_message(parsed_max_chat_id, text, elements)
+            resp = await max_client.send_message(
+                parsed_max_chat_id,
+                text,
+                elements,
+                reply_to_max_message_id=reply_to_max_message_id,
+            )
+            _store_direct_message_mapping(
+                message_store=message_store,
+                tg_chat_id=int(allowed_chat_id),
+                tg_message_id=outbound_tg_message_id,
+                max_chat_id=str(mapping.max_chat_id),
+                message_thread_id=int(message_thread_id),
+                response=resp,
+            )
         else:
-            command_store.enqueue(parsed_max_chat_id, text, elements)
+            command_store.enqueue(
+                parsed_max_chat_id,
+                text,
+                elements,
+                reply_to_max_message_id=reply_to_max_message_id,
+                tg_chat_id=int(allowed_chat_id),
+                tg_message_id=outbound_tg_message_id,
+                message_thread_id=int(message_thread_id),
+            )
             resp = {"queued": True}
         if not resp:
             await message.reply_text("⚠️ Не удалось отправить сообщение в Max.")
@@ -237,12 +416,15 @@ def build_tg_app(
     *,
     command_store: CommandStore | None = None,
     max_client: MaxClient | None = None,
+    message_store: MessageStore | None = None,
 ) -> Application:
     app = Application.builder().token(token).build()
     if max_client is not None:
         app.bot_data["max_client"] = max_client
     if command_store is not None:
         app.bot_data[_COMMAND_STORE_KEY] = command_store
+    if message_store is not None:
+        app.bot_data[_MESSAGE_STORE_KEY] = message_store
     app.bot_data[_ALLOWED_CHAT_ID_KEY] = int(allowed_chat_id)
     app.bot_data[_TOPIC_STORE_KEY] = topic_store
 

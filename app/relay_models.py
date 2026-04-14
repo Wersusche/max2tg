@@ -77,6 +77,10 @@ class MaxCommand:
     elements: list[dict[str, Any]] = field(default_factory=list)
     filename: str | None = None
     attachment: bytes | None = None
+    reply_to_max_message_id: str | None = None
+    tg_chat_id: int | None = None
+    tg_message_id: int | None = None
+    message_thread_id: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -90,6 +94,14 @@ class MaxCommand:
             data["filename"] = self.filename
         if self.attachment is not None:
             data["attachment_b64"] = base64.b64encode(self.attachment).decode("ascii")
+        if self.reply_to_max_message_id is not None:
+            data["reply_to_max_message_id"] = self.reply_to_max_message_id
+        if self.tg_chat_id is not None:
+            data["tg_chat_id"] = self.tg_chat_id
+        if self.tg_message_id is not None:
+            data["tg_message_id"] = self.tg_message_id
+        if self.message_thread_id is not None:
+            data["message_thread_id"] = self.message_thread_id
         return data
 
     @classmethod
@@ -103,6 +115,10 @@ class MaxCommand:
             elements=list(payload.get("elements") or []),
             filename=payload.get("filename"),
             attachment=base64.b64decode(attachment_b64) if attachment_b64 else None,
+            reply_to_max_message_id=str(payload["reply_to_max_message_id"]) if payload.get("reply_to_max_message_id") is not None else None,
+            tg_chat_id=int(payload["tg_chat_id"]) if payload.get("tg_chat_id") is not None else None,
+            tg_message_id=int(payload["tg_message_id"]) if payload.get("tg_message_id") is not None else None,
+            message_thread_id=int(payload["message_thread_id"]) if payload.get("message_thread_id") is not None else None,
         )
 
 

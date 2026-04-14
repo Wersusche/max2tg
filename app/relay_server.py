@@ -222,6 +222,7 @@ def create_relay_app(
     app.router.add_post("/internal/telegram-batch", _telegram_batch)
     app.router.add_get("/internal/max-commands/pull", _pull_max_command)
     app.router.add_post("/internal/max-commands/{command_id}/ack", _ack_max_command)
+    app.router.add_post("/internal/message-mappings/upsert", _upsert_message_mapping)
     app.router.add_get("/internal/message-mappings/lookup", _lookup_message_mapping)
     return app
 
@@ -262,6 +263,22 @@ async def _ack_max_command(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def _upsert_message_mapping(request: web.Request) -> web.Response:
+    _authorize(request)
+    message_store = request.app[MESSAGE_STORE_KEY]
+    payload = await request.json()
+    message_store.upsert_mapping(
+        tg_chat_id=int(payload["tg_chat_id"]),
+        max_chat_id=payload["max_chat_id"],
+        max_message_id=payload["max_message_id"],
+        tg_message_id=int(payload["tg_message_id"]),
+        message_thread_id=int(payload["message_thread_id"]) if payload.get("message_thread_id") is not None else None,
+        direction=str(payload.get("direction") or "tg_to_max"),
+        source=str(payload.get("source") or "telegram"),
+    )
+    return web.json_response({"ok": True})
+
+
 async def _lookup_message_mapping(request: web.Request) -> web.Response:
     _authorize(request)
     message_store = request.app[MESSAGE_STORE_KEY]
@@ -273,6 +290,7 @@ async def _lookup_message_mapping(request: web.Request) -> web.Response:
     mapping = message_store.get_by_max_message(
         max_chat_id=max_chat_id,
         max_message_id=max_message_id,
+        direction=None,
     )
     if mapping is None:
         raise web.HTTPNotFound(text="message mapping not found")

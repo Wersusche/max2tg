@@ -97,7 +97,15 @@ async def test_relay_processes_multipart_photo_batch(tmp_path):
 async def test_relay_pulls_and_acks_command(tmp_path):
     client, _sender, topic_store, command_store, message_store = await _make_client(tmp_path)
     try:
-        queued = command_store.enqueue(42, "Hello", [{"type": "STRONG"}])
+        queued = command_store.enqueue(
+            42,
+            "Hello",
+            [{"type": "STRONG"}],
+            reply_to_max_message_id="max-1",
+            tg_chat_id=-100,
+            tg_message_id=7001,
+            message_thread_id=55,
+        )
 
         pull = await client.get("/internal/max-commands/pull", headers={"X-Relay-Secret": "secret"})
         assert pull.status == 200
@@ -105,6 +113,10 @@ async def test_relay_pulls_and_acks_command(tmp_path):
         assert payload["id"] == queued.id
         assert payload["max_chat_id"] == "42"
         assert payload["text"] == "Hello"
+        assert payload["reply_to_max_message_id"] == "max-1"
+        assert payload["tg_chat_id"] == -100
+        assert payload["tg_message_id"] == 7001
+        assert payload["message_thread_id"] == 55
 
         ack = await client.post(
             f"/internal/max-commands/{queued.id}/ack",
@@ -167,6 +179,42 @@ async def test_relay_stores_message_mapping_and_exposes_lookup(tmp_path):
         payload = await lookup.json()
         assert payload["tg_message_id"] == 7001
         assert payload["message_thread_id"] == 55
+    finally:
+        await client.close()
+        topic_store.close()
+        command_store.close()
+        message_store.close()
+
+
+@pytest.mark.asyncio
+async def test_relay_upserts_tg_to_max_mapping_and_lookup_finds_it(tmp_path):
+    client, _sender, topic_store, command_store, message_store = await _make_client(tmp_path)
+    try:
+        upsert = await client.post(
+            "/internal/message-mappings/upsert",
+            json={
+                "tg_chat_id": -100,
+                "tg_message_id": 7002,
+                "max_chat_id": "42",
+                "max_message_id": "max-2",
+                "message_thread_id": 56,
+                "direction": "tg_to_max",
+                "source": "telegram",
+            },
+            headers={"X-Relay-Secret": "secret"},
+        )
+        assert upsert.status == 200
+
+        lookup = await client.get(
+            "/internal/message-mappings/lookup",
+            params={"max_chat_id": "42", "max_message_id": "max-2"},
+            headers={"X-Relay-Secret": "secret"},
+        )
+        assert lookup.status == 200
+        payload = await lookup.json()
+        assert payload["tg_chat_id"] == -100
+        assert payload["tg_message_id"] == 7002
+        assert payload["message_thread_id"] == 56
     finally:
         await client.close()
         topic_store.close()

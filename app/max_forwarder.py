@@ -392,6 +392,7 @@ async def _resolve_reply_to_message_id(
     mapping = message_store.get_by_max_message(
         max_chat_id=msg.chat_id,
         max_message_id=linked_max_message_id,
+        direction=None,
     )
     if mapping is None:
         return None

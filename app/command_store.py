@@ -48,6 +48,10 @@ class CommandStore:
                     elements_json TEXT NOT NULL,
                     filename TEXT NULL,
                     attachment_blob BLOB NULL,
+                    reply_to_max_message_id TEXT NULL,
+                    tg_chat_id INTEGER NULL,
+                    tg_message_id INTEGER NULL,
+                    message_thread_id INTEGER NULL,
                     leased_at TEXT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
@@ -69,19 +73,63 @@ class CommandStore:
                 self._conn.execute(
                     "ALTER TABLE max_commands ADD COLUMN attachment_blob BLOB NULL"
                 )
+            if "reply_to_max_message_id" not in existing_columns:
+                self._conn.execute(
+                    "ALTER TABLE max_commands ADD COLUMN reply_to_max_message_id TEXT NULL"
+                )
+            if "tg_chat_id" not in existing_columns:
+                self._conn.execute(
+                    "ALTER TABLE max_commands ADD COLUMN tg_chat_id INTEGER NULL"
+                )
+            if "tg_message_id" not in existing_columns:
+                self._conn.execute(
+                    "ALTER TABLE max_commands ADD COLUMN tg_message_id INTEGER NULL"
+                )
+            if "message_thread_id" not in existing_columns:
+                self._conn.execute(
+                    "ALTER TABLE max_commands ADD COLUMN message_thread_id INTEGER NULL"
+                )
             self._conn.commit()
 
-    def enqueue(self, max_chat_id: Any, text: str, elements: list[dict[str, Any]] | None = None) -> MaxCommand:
+    def enqueue(
+        self,
+        max_chat_id: Any,
+        text: str,
+        elements: list[dict[str, Any]] | None = None,
+        *,
+        reply_to_max_message_id: Any | None = None,
+        tg_chat_id: int | None = None,
+        tg_message_id: int | None = None,
+        message_thread_id: int | None = None,
+    ) -> MaxCommand:
         payload = json.dumps(elements or [], ensure_ascii=False)
         with self._lock:
             cur = self._conn.execute(
                 """
                 INSERT INTO max_commands (
-                    max_chat_id, kind, text, elements_json, filename, attachment_blob, leased_at
+                    max_chat_id,
+                    kind,
+                    text,
+                    elements_json,
+                    filename,
+                    attachment_blob,
+                    reply_to_max_message_id,
+                    tg_chat_id,
+                    tg_message_id,
+                    message_thread_id,
+                    leased_at
                 )
-                VALUES (?, 'text', ?, ?, NULL, NULL, NULL)
+                VALUES (?, 'text', ?, ?, NULL, NULL, ?, ?, ?, ?, NULL)
                 """,
-                (str(max_chat_id), text, payload),
+                (
+                    str(max_chat_id),
+                    text,
+                    payload,
+                    str(reply_to_max_message_id) if reply_to_max_message_id is not None else None,
+                    int(tg_chat_id) if tg_chat_id is not None else None,
+                    int(tg_message_id) if tg_message_id is not None else None,
+                    int(message_thread_id) if message_thread_id is not None else None,
+                ),
             )
             self._conn.commit()
             command_id = int(cur.lastrowid)
@@ -92,6 +140,10 @@ class CommandStore:
             text=text,
             kind="text",
             elements=list(elements or []),
+            reply_to_max_message_id=str(reply_to_max_message_id) if reply_to_max_message_id is not None else None,
+            tg_chat_id=int(tg_chat_id) if tg_chat_id is not None else None,
+            tg_message_id=int(tg_message_id) if tg_message_id is not None else None,
+            message_thread_id=int(message_thread_id) if message_thread_id is not None else None,
         )
 
     def enqueue_photo(
@@ -101,17 +153,42 @@ class CommandStore:
         caption: str = "",
         elements: list[dict[str, Any]] | None = None,
         filename: str = "photo.jpg",
+        *,
+        reply_to_max_message_id: Any | None = None,
+        tg_chat_id: int | None = None,
+        tg_message_id: int | None = None,
+        message_thread_id: int | None = None,
     ) -> MaxCommand:
         payload = json.dumps(elements or [], ensure_ascii=False)
         with self._lock:
             cur = self._conn.execute(
                 """
                 INSERT INTO max_commands (
-                    max_chat_id, kind, text, elements_json, filename, attachment_blob, leased_at
+                    max_chat_id,
+                    kind,
+                    text,
+                    elements_json,
+                    filename,
+                    attachment_blob,
+                    reply_to_max_message_id,
+                    tg_chat_id,
+                    tg_message_id,
+                    message_thread_id,
+                    leased_at
                 )
-                VALUES (?, 'photo', ?, ?, ?, ?, NULL)
+                VALUES (?, 'photo', ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
-                (str(max_chat_id), caption, payload, filename, sqlite3.Binary(photo)),
+                (
+                    str(max_chat_id),
+                    caption,
+                    payload,
+                    filename,
+                    sqlite3.Binary(photo),
+                    str(reply_to_max_message_id) if reply_to_max_message_id is not None else None,
+                    int(tg_chat_id) if tg_chat_id is not None else None,
+                    int(tg_message_id) if tg_message_id is not None else None,
+                    int(message_thread_id) if message_thread_id is not None else None,
+                ),
             )
             self._conn.commit()
             command_id = int(cur.lastrowid)
@@ -124,6 +201,10 @@ class CommandStore:
             elements=list(elements or []),
             filename=filename,
             attachment=bytes(photo),
+            reply_to_max_message_id=str(reply_to_max_message_id) if reply_to_max_message_id is not None else None,
+            tg_chat_id=int(tg_chat_id) if tg_chat_id is not None else None,
+            tg_message_id=int(tg_message_id) if tg_message_id is not None else None,
+            message_thread_id=int(message_thread_id) if message_thread_id is not None else None,
         )
 
     def enqueue_document(
@@ -133,6 +214,11 @@ class CommandStore:
         caption: str = "",
         elements: list[dict[str, Any]] | None = None,
         filename: str = "file",
+        *,
+        reply_to_max_message_id: Any | None = None,
+        tg_chat_id: int | None = None,
+        tg_message_id: int | None = None,
+        message_thread_id: int | None = None,
     ) -> MaxCommand:
         return self.enqueue_attachment(
             max_chat_id,
@@ -141,6 +227,10 @@ class CommandStore:
             text=caption,
             elements=elements,
             filename=filename,
+            reply_to_max_message_id=reply_to_max_message_id,
+            tg_chat_id=tg_chat_id,
+            tg_message_id=tg_message_id,
+            message_thread_id=message_thread_id,
         )
 
     def enqueue_attachment(
@@ -152,15 +242,29 @@ class CommandStore:
         text: str = "",
         elements: list[dict[str, Any]] | None = None,
         filename: str | None = None,
+        reply_to_max_message_id: Any | None = None,
+        tg_chat_id: int | None = None,
+        tg_message_id: int | None = None,
+        message_thread_id: int | None = None,
     ) -> MaxCommand:
         payload = json.dumps(elements or [], ensure_ascii=False)
         with self._lock:
             cur = self._conn.execute(
                 """
                 INSERT INTO max_commands (
-                    max_chat_id, kind, text, elements_json, filename, attachment_blob, leased_at
+                    max_chat_id,
+                    kind,
+                    text,
+                    elements_json,
+                    filename,
+                    attachment_blob,
+                    reply_to_max_message_id,
+                    tg_chat_id,
+                    tg_message_id,
+                    message_thread_id,
+                    leased_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                 """,
                 (
                     str(max_chat_id),
@@ -169,6 +273,10 @@ class CommandStore:
                     payload,
                     filename,
                     sqlite3.Binary(attachment),
+                    str(reply_to_max_message_id) if reply_to_max_message_id is not None else None,
+                    int(tg_chat_id) if tg_chat_id is not None else None,
+                    int(tg_message_id) if tg_message_id is not None else None,
+                    int(message_thread_id) if message_thread_id is not None else None,
                 ),
             )
             self._conn.commit()
@@ -182,13 +290,28 @@ class CommandStore:
             elements=list(elements or []),
             filename=filename,
             attachment=bytes(attachment),
+            reply_to_max_message_id=str(reply_to_max_message_id) if reply_to_max_message_id is not None else None,
+            tg_chat_id=int(tg_chat_id) if tg_chat_id is not None else None,
+            tg_message_id=int(tg_message_id) if tg_message_id is not None else None,
+            message_thread_id=int(message_thread_id) if message_thread_id is not None else None,
         )
 
     def lease_next(self) -> MaxCommand | None:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT id, max_chat_id, kind, text, elements_json, filename, attachment_blob
+                SELECT
+                    id,
+                    max_chat_id,
+                    kind,
+                    text,
+                    elements_json,
+                    filename,
+                    attachment_blob,
+                    reply_to_max_message_id,
+                    tg_chat_id,
+                    tg_message_id,
+                    message_thread_id
                 FROM max_commands
                 WHERE leased_at IS NULL
                 ORDER BY id ASC
@@ -267,6 +390,10 @@ class CommandStore:
             elements=list(json.loads(row["elements_json"])),
             filename=row["filename"],
             attachment=bytes(row["attachment_blob"]) if row["attachment_blob"] is not None else None,
+            reply_to_max_message_id=str(row["reply_to_max_message_id"]) if row["reply_to_max_message_id"] is not None else None,
+            tg_chat_id=int(row["tg_chat_id"]) if row["tg_chat_id"] is not None else None,
+            tg_message_id=int(row["tg_message_id"]) if row["tg_message_id"] is not None else None,
+            message_thread_id=int(row["message_thread_id"]) if row["message_thread_id"] is not None else None,
         )
 
     def _get_or_create_event(self) -> asyncio.Event:
