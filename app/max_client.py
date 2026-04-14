@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import random
 import time
@@ -326,6 +327,24 @@ class MaxClient:
             return {}
         return await self.send_message(chat_id, caption, elements, attaches=[attach])
 
+    async def send_document(
+        self,
+        chat_id,
+        data: bytes,
+        caption: str = "",
+        elements=None,
+        filename: str = "file",
+    ) -> dict:
+        """Upload a document and send it to a Max chat."""
+        if not data:
+            log.warning("send_document(chat=%s) skipped: empty payload", chat_id)
+            return {}
+
+        attach = await self.upload_document(chat_id, data, filename=filename)
+        if not attach:
+            return {}
+        return await self.send_message(chat_id, caption, elements, attaches=[attach])
+
     async def upload_photo(self, chat_id, data: bytes, filename: str = "photo.jpg") -> dict:
         """Upload photo bytes to Max and return attach payload for send_message."""
         upload_info = await self.cmd(OpCode.PHOTO_UPLOAD_URL, {"count": 1})
@@ -363,6 +382,46 @@ class MaxClient:
         return {
             "_type": "PHOTO",
             "photoToken": first_photo["token"],
+        }
+
+    async def upload_document(self, chat_id, data: bytes, filename: str = "file") -> dict:
+        """Upload generic file bytes to Max and return attach payload for send_message."""
+        upload_info = await self.cmd(OpCode.PHOTO_UPLOAD_URL, {"count": 1})
+        upload_url = upload_info.get("url")
+        if not upload_url:
+            log.warning("Document upload URL missing for chat=%s: %s", chat_id, upload_info)
+            return {}
+
+        init_payload = await self.cmd(
+            OpCode.UPLOAD_ATTACH,
+            {
+                "chatId": chat_id,
+                "type": "FILE",
+            },
+        )
+        if init_payload == {}:
+            log.warning("Document upload init failed for chat=%s", chat_id)
+            return {}
+
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        response_payload = await self._upload_bytes(
+            upload_url,
+            data,
+            filename=filename,
+            content_type=content_type,
+        )
+        if not response_payload:
+            return {}
+
+        token = self._extract_upload_token(response_payload, container_keys=("files", "file", "attachments"))
+        if not token:
+            log.warning("Document upload token missing for chat=%s: %s", chat_id, response_payload)
+            return {}
+
+        return {
+            "_type": "FILE",
+            "fileToken": token,
+            "name": filename,
         }
 
     async def _upload_bytes(
@@ -475,3 +534,35 @@ class MaxClient:
             log.info("Dumped %s (%d bytes)", path, os.path.getsize(path))
         except Exception:
             log.exception("Failed to dump %s", path)
+
+    @staticmethod
+    def _extract_upload_token(
+        payload: dict,
+        *,
+        container_keys: tuple[str, ...] = ("files", "file"),
+    ) -> str | None:
+        direct_token = payload.get("token")
+        if isinstance(direct_token, str) and direct_token:
+            return direct_token
+
+        for key in container_keys:
+            container = payload.get(key)
+            if isinstance(container, dict):
+                if isinstance(container.get("token"), str) and container.get("token"):
+                    return container["token"]
+                first_item = next(iter(container.values()), None)
+                if isinstance(first_item, dict):
+                    nested_token = first_item.get("token")
+                    if isinstance(nested_token, str) and nested_token:
+                        return nested_token
+            if isinstance(container, list):
+                first_item = container[0] if container else None
+                if isinstance(first_item, dict):
+                    nested_token = first_item.get("token")
+                    if isinstance(nested_token, str) and nested_token:
+                        return nested_token
+
+        nested_file = payload.get("payload")
+        if isinstance(nested_file, dict):
+            return MaxClient._extract_upload_token(nested_file, container_keys=container_keys)
+        return None

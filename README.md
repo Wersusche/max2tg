@@ -139,6 +139,7 @@ RELAY_BIND_HOST=0.0.0.0
 RELAY_BIND_PORT=8080
 TOPIC_DB_PATH=data/topics.sqlite3
 COMMAND_DB_PATH=data/commands.sqlite3
+MESSAGE_DB_PATH=data/messages.sqlite3
 REPLY_ENABLED=true
 DEBUG=false
 ```

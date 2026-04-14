@@ -3,6 +3,7 @@ from datetime import datetime
 
 from app.max_client import MaxClient
 from app.max_forwarder import _guess_media_kind, _human_size, forward_max_message
+from app.message_store import MessageStore
 from app.relay_client import RelayClient
 from app.resolver import ContactResolver
 from app.tg_sender import TelegramSender
@@ -22,6 +23,7 @@ def create_max_client(
     reply_enabled: bool = False,
     topic_router: TopicRouter | None = None,
     relay_client: RelayClient | None = None,
+    message_store: MessageStore | None = None,
 ) -> MaxClient:
     del reply_enabled
 
@@ -81,6 +83,7 @@ def create_max_client(
             resolver=resolver,
             topic_router=topic_router,
             relay_client=relay_client,
+            message_store=message_store,
         )
 
     return client

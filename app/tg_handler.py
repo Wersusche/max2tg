@@ -40,7 +40,7 @@ def _decorate_outbound_text(
     elements: list[dict] = []
     if message.chat.type in [telegram.constants.ChatType.GROUP, telegram.constants.ChatType.SUPERGROUP]:
         sender_name = message.from_user.full_name if message.from_user else "Telegram"
-        prefix = f"💬 {sender_name}:"
+        prefix = f"\U0001F4AC {sender_name}:"
         elements = [
             {
                 "type": "STRONG",
@@ -59,6 +59,10 @@ def _has_photo(message) -> bool:
     return bool(getattr(message, "photo", None))
 
 
+def _has_document(message) -> bool:
+    return getattr(message, "document", None) is not None
+
+
 def _guess_photo_filename(telegram_file) -> str:
     file_path = getattr(telegram_file, "file_path", "") or ""
     _, ext = os.path.splitext(file_path)
@@ -70,6 +74,19 @@ def _guess_photo_filename(telegram_file) -> str:
     return f"photo{ext}"
 
 
+def _guess_document_filename(message, telegram_file) -> str:
+    document = getattr(message, "document", None)
+    file_name = getattr(document, "file_name", None)
+    if file_name:
+        return str(file_name)
+
+    file_path = getattr(telegram_file, "file_path", "") or ""
+    basename = os.path.basename(file_path)
+    if basename:
+        return basename
+    return "file"
+
+
 async def _download_largest_photo(message) -> tuple[bytes, str] | None:
     photos = list(getattr(message, "photo", None) or [])
     if not photos:
@@ -78,6 +95,16 @@ async def _download_largest_photo(message) -> tuple[bytes, str] | None:
     telegram_file = await photos[-1].get_file()
     payload = await telegram_file.download_as_bytearray()
     return bytes(payload), _guess_photo_filename(telegram_file)
+
+
+async def _download_document(message) -> tuple[bytes, str] | None:
+    document = getattr(message, "document", None)
+    if document is None:
+        return None
+
+    telegram_file = await document.get_file()
+    payload = await telegram_file.download_as_bytearray()
+    return bytes(payload), _guess_document_filename(message, telegram_file)
 
 
 async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -104,7 +131,7 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     mapping = topic_store.get_by_thread(int(allowed_chat_id), int(message_thread_id))
     if mapping is None:
-        if _message_text_or_caption(update) or _has_photo(message):
+        if _message_text_or_caption(update) or _has_photo(message) or _has_document(message):
             await message.reply_text(
                 "⚠️ Не знаю, какому чату Max соответствует этот топик. "
                 "Дождитесь входящего сообщения из Max, чтобы бот создал тему."
@@ -153,9 +180,41 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 await message.reply_text("⚠️ Не удалось отправить фото в Max.")
             return
 
+        if _has_document(message):
+            document = await _download_document(message)
+            if document is None:
+                await message.reply_text("⚠️ Не удалось скачать файл из Telegram.")
+                return
+            document_bytes, filename = document
+            caption, elements = _decorate_outbound_text(
+                message,
+                text,
+                include_sender_when_empty=True,
+            )
+            if max_client:
+                resp = await max_client.send_document(
+                    parsed_max_chat_id,
+                    document_bytes,
+                    caption=caption,
+                    elements=elements,
+                    filename=filename,
+                )
+            else:
+                command_store.enqueue_document(
+                    parsed_max_chat_id,
+                    document_bytes,
+                    caption=caption,
+                    elements=elements,
+                    filename=filename,
+                )
+                resp = {"queued": True}
+            if not resp:
+                await message.reply_text("⚠️ Не удалось отправить файл в Max.")
+            return
+
         if not text:
             if getattr(message, "effective_attachment", None) is not None:
-                await message.reply_text("⚠️ Пока умею отправлять в Max только текст и фото.")
+                await message.reply_text("⚠️ Пока умею отправлять в Max только текст, фото и файлы.")
             return
 
         text, elements = _decorate_outbound_text(message, text)

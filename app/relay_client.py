@@ -105,6 +105,26 @@ class RelayClient:
         ) as resp:
             await _raise_for_status(resp)
 
+    async def lookup_message_mapping(self, *, max_chat_id: Any, max_message_id: Any) -> int | None:
+        session = await self._get_session()
+        async with session.get(
+            f"{self.base_url}/internal/message-mappings/lookup",
+            params={
+                "max_chat_id": str(max_chat_id),
+                "max_message_id": str(max_message_id),
+            },
+            headers={SECRET_HEADER: self.shared_secret},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status == 404:
+                return None
+            await _raise_for_status(resp)
+            payload = await resp.json()
+            raw_message_id = payload.get("tg_message_id")
+            if raw_message_id is None:
+                return None
+            return int(raw_message_id)
+
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
@@ -122,9 +142,10 @@ class RelayStatusSender:
         text: str,
         reply_markup=None,
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
         raise_bad_request: bool = False,
     ):
-        del reply_markup, message_thread_id, raise_bad_request
+        del reply_markup, message_thread_id, reply_to_message_id, raise_bad_request
         await self.relay_client.send_batch(
             TelegramBatch(
                 max_chat_id="__system__",

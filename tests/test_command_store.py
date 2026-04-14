@@ -47,3 +47,22 @@ def test_enqueue_photo_lease_and_ack(tmp_path):
     store.ack(leased.id)
     assert store.count() == 0
     store.close()
+
+
+def test_enqueue_document_lease_and_ack(tmp_path):
+    store = _make_store(tmp_path)
+    queued = store.enqueue_document(42, b"file-bytes", caption="doc", filename="report.pdf")
+
+    leased = store.lease_next()
+
+    assert leased is not None
+    assert leased.id == queued.id
+    assert leased.max_chat_id == "42"
+    assert leased.kind == "document"
+    assert leased.text == "doc"
+    assert leased.filename == "report.pdf"
+    assert leased.attachment == b"file-bytes"
+
+    store.ack(leased.id)
+    assert store.count() == 0
+    store.close()

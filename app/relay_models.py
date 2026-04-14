@@ -37,12 +37,18 @@ class RelayOperation:
 class TelegramBatch:
     max_chat_id: str
     topic_name: str | None
+    max_message_id: str | None = None
+    reply_to_message_id: int | None = None
+    mapping_operation_index: int | None = None
     operations: list[RelayOperation] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "max_chat_id": self.max_chat_id,
             "topic_name": self.topic_name,
+            "max_message_id": self.max_message_id,
+            "reply_to_message_id": self.reply_to_message_id,
+            "mapping_operation_index": self.mapping_operation_index,
             "operations": [operation.to_dict() for operation in self.operations],
         }
 
@@ -55,6 +61,9 @@ class TelegramBatch:
         return cls(
             max_chat_id=str(payload["max_chat_id"]),
             topic_name=payload.get("topic_name"),
+            max_message_id=str(payload["max_message_id"]) if payload.get("max_message_id") is not None else None,
+            reply_to_message_id=int(payload["reply_to_message_id"]) if payload.get("reply_to_message_id") is not None else None,
+            mapping_operation_index=int(payload["mapping_operation_index"]) if payload.get("mapping_operation_index") is not None else None,
             operations=operations,
         )
 
@@ -111,9 +120,10 @@ class RelayOperationBuilder:
         text: str,
         reply_markup=None,
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
         raise_bad_request: bool = False,
     ):
-        del reply_markup, message_thread_id, raise_bad_request
+        del reply_markup, message_thread_id, reply_to_message_id, raise_bad_request
         if text:
             self.operations.append(RelayOperation(kind="text", text=text))
         return {"ok": True}
@@ -125,9 +135,10 @@ class RelayOperationBuilder:
         filename: str = "photo.jpg",
         reply_markup=None,
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
         raise_bad_request: bool = False,
     ):
-        del reply_markup, message_thread_id, raise_bad_request
+        del reply_markup, message_thread_id, reply_to_message_id, raise_bad_request
         self._add_media("photo", data, caption, filename)
         return {"ok": True}
 
@@ -138,9 +149,10 @@ class RelayOperationBuilder:
         filename: str = "file",
         reply_markup=None,
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
         raise_bad_request: bool = False,
     ):
-        del reply_markup, message_thread_id, raise_bad_request
+        del reply_markup, message_thread_id, reply_to_message_id, raise_bad_request
         self._add_media("document", data, caption, filename)
         return {"ok": True}
 
@@ -151,9 +163,10 @@ class RelayOperationBuilder:
         filename: str = "video.mp4",
         reply_markup=None,
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
         raise_bad_request: bool = False,
     ):
-        del reply_markup, message_thread_id, raise_bad_request
+        del reply_markup, message_thread_id, reply_to_message_id, raise_bad_request
         self._add_media("video", data, caption, filename)
         return {"ok": True}
 
@@ -163,9 +176,10 @@ class RelayOperationBuilder:
         caption: str = "",
         reply_markup=None,
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
         raise_bad_request: bool = False,
     ):
-        del reply_markup, message_thread_id, raise_bad_request
+        del reply_markup, message_thread_id, reply_to_message_id, raise_bad_request
         self._add_media("voice", data, caption, "voice.ogg")
         return {"ok": True}
 
@@ -174,16 +188,28 @@ class RelayOperationBuilder:
         data: bytes,
         reply_markup=None,
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
         raise_bad_request: bool = False,
     ):
-        del reply_markup, message_thread_id, raise_bad_request
+        del reply_markup, message_thread_id, reply_to_message_id, raise_bad_request
         self._add_media("sticker", data, "", "sticker.webp")
         return {"ok": True}
 
-    def build_batch(self, max_chat_id: Any, topic_name: str | None) -> TelegramBatch:
+    def build_batch(
+        self,
+        max_chat_id: Any,
+        topic_name: str | None,
+        *,
+        max_message_id: Any | None = None,
+        reply_to_message_id: int | None = None,
+        mapping_operation_index: int | None = None,
+    ) -> TelegramBatch:
         return TelegramBatch(
             max_chat_id=str(max_chat_id),
             topic_name=topic_name,
+            max_message_id=str(max_message_id) if max_message_id is not None else None,
+            reply_to_message_id=int(reply_to_message_id) if reply_to_message_id is not None else None,
+            mapping_operation_index=int(mapping_operation_index) if mapping_operation_index is not None else None,
             operations=list(self.operations),
         )
 

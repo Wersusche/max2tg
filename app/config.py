@@ -26,6 +26,7 @@ class Settings:
     tg_chat_id: str | None = None
     topic_db_path: str = "data/topics.sqlite3"
     command_db_path: str = "data/commands.sqlite3"
+    message_db_path: str = "data/messages.sqlite3"
     relay_bind_host: str = "127.0.0.1"
     relay_bind_port: int = 8080
     relay_host_port: int = 8080
@@ -179,6 +180,7 @@ def load_settings() -> Settings:
         tg_chat_id=env.get("TG_CHAT_ID") or None,
         topic_db_path=env.get("TOPIC_DB_PATH") or "data/topics.sqlite3",
         command_db_path=env.get("COMMAND_DB_PATH") or "data/commands.sqlite3",
+        message_db_path=env.get("MESSAGE_DB_PATH") or "data/messages.sqlite3",
         relay_bind_host=env.get("RELAY_BIND_HOST") or "127.0.0.1",
         relay_bind_port=relay_bind_port,
         relay_host_port=relay_host_port,
@@ -199,7 +201,7 @@ def load_settings() -> Settings:
             _require(env, ["FOREIGN_RELAY_ENV_B64"])
         _reject_present(
             env,
-            ["TG_BOT_TOKEN", "TG_CHAT_ID", "TOPIC_DB_PATH", "COMMAND_DB_PATH"],
+            ["TG_BOT_TOKEN", "TG_CHAT_ID", "TOPIC_DB_PATH", "COMMAND_DB_PATH", "MESSAGE_DB_PATH"],
             role=settings.app_role,
         )
         _validate_ssh_private_key(settings.foreign_ssh_private_key)

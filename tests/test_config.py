@@ -86,6 +86,7 @@ class TestSettingsDataclass:
         assert settings.max_chat_ids is None
         assert settings.topic_db_path == "data/topics.sqlite3"
         assert settings.command_db_path == "data/commands.sqlite3"
+        assert settings.message_db_path == "data/messages.sqlite3"
         assert settings.relay_bind_host == "127.0.0.1"
         assert settings.relay_bind_port == 8080
         assert settings.relay_host_port == 8080
@@ -228,12 +229,18 @@ class TestLoadSettingsMaxBridge:
 class TestLoadSettingsRelay:
     def test_valid_env(self):
         settings = _load_settings_with_env(
-            _relay_env(DEBUG="1", REPLY_ENABLED="true", COMMAND_DB_PATH="/tmp/commands.sqlite3")
+            _relay_env(
+                DEBUG="1",
+                REPLY_ENABLED="true",
+                COMMAND_DB_PATH="/tmp/commands.sqlite3",
+                MESSAGE_DB_PATH="/tmp/messages.sqlite3",
+            )
         )
         assert settings.app_role == APP_ROLE_TG_RELAY
         assert settings.tg_bot_token == "123456:AAABBBCCC"
         assert settings.tg_chat_id == "-100123456"
         assert settings.command_db_path == "/tmp/commands.sqlite3"
+        assert settings.message_db_path == "/tmp/messages.sqlite3"
         assert settings.debug is True
         assert settings.reply_enabled is True
 

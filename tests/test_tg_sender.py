@@ -24,6 +24,17 @@ async def test_send_message_passes_message_thread_id():
 
 
 @pytest.mark.asyncio
+async def test_send_message_passes_reply_to_message_id():
+    sender = _make_sender()
+    sender._bot.send_message = AsyncMock(return_value="ok")
+
+    await sender.send("hello", reply_to_message_id=77)
+
+    assert sender._bot.send_message.await_args.kwargs["reply_to_message_id"] == 77
+    assert sender._bot.send_message.await_args.kwargs["allow_sending_without_reply"] is True
+
+
+@pytest.mark.asyncio
 async def test_send_photo_passes_message_thread_id():
     sender = _make_sender()
     sender._bot.send_photo = AsyncMock(return_value="ok")
@@ -41,6 +52,17 @@ async def test_send_document_passes_message_thread_id():
     await sender.send_document(b"data", message_thread_id=99)
 
     assert sender._bot.send_document.await_args.kwargs["message_thread_id"] == 99
+
+
+@pytest.mark.asyncio
+async def test_send_document_passes_reply_to_message_id():
+    sender = _make_sender()
+    sender._bot.send_document = AsyncMock(return_value="ok")
+
+    await sender.send_document(b"data", reply_to_message_id=77)
+
+    assert sender._bot.send_document.await_args.kwargs["reply_to_message_id"] == 77
+    assert sender._bot.send_document.await_args.kwargs["allow_sending_without_reply"] is True
 
 
 @pytest.mark.asyncio
