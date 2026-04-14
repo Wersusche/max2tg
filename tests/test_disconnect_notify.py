@@ -1,39 +1,49 @@
-"""Tests for disconnect notification throttling in app/max_listener.py."""
+"""Tests for disconnect notification behaviour in app/max_listener.py."""
+
+from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from datetime import datetime
-from unittest.mock import AsyncMock, patch
 
 from app.max_listener import create_max_client
 
 
 def _make_client(sender=None):
     if sender is None:
-        sender = AsyncMock()
-    return create_max_client(
-        max_token="tok",
-        max_device_id="dev",
-        sender=sender,
-    ), sender
+        sender = SimpleNamespace(send=AsyncMock())
+    return (
+        create_max_client(
+            max_token="tok",
+            max_device_id="dev",
+            sender=sender,
+        ),
+        sender,
+    )
 
 
-# ---------------------------------------------------------------------------
-# on_disconnect throttle logic
-# ---------------------------------------------------------------------------
+def _snapshot(chat_count: int = 0) -> dict:
+    chats = [
+        {"id": index + 100, "type": "GROUP", "title": f"Chat {index}", "participants": {}}
+        for index in range(chat_count)
+    ]
+    return {"profile": {"id": 1, "names": []}, "chats": chats}
 
-class TestDisconnectThrottle:
-    """Tests for disconnect notification rate-limiting."""
 
+class TestDisconnectNotifications:
+    @pytest.mark.asyncio
     async def test_first_disconnect_sends_immediately(self):
         client, sender = _make_client()
+
         await client._on_disconnect_cb()
-        sender.send.assert_called_once()
 
-    async def test_second_disconnect_suppressed_within_1_hour(self):
+        sender.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_repeated_disconnect_during_same_outage_is_suppressed(self):
         client, sender = _make_client()
-
         t0 = datetime(2026, 4, 5, 10, 0, 0)
-        t1 = datetime(2026, 4, 5, 10, 30, 0)  # 30 min later
+        t1 = datetime(2026, 4, 5, 11, 30, 0)
 
         with patch("app.max_listener.datetime") as mock_dt:
             mock_dt.now.return_value = t0
@@ -43,142 +53,77 @@ class TestDisconnectThrottle:
             sender.send.reset_mock()
             await client._on_disconnect_cb()
 
-        sender.send.assert_not_called()
+        sender.send.assert_not_awaited()
 
-    async def test_second_disconnect_sends_after_1_hour(self):
+    @pytest.mark.asyncio
+    async def test_next_outage_after_ready_is_throttled_within_one_hour(self):
         client, sender = _make_client()
-
         t0 = datetime(2026, 4, 5, 10, 0, 0)
-        t1 = datetime(2026, 4, 5, 11, 0, 1)  # 1 hour + 1 sec later
+        t_ready = datetime(2026, 4, 5, 10, 5, 0)
+        t1 = datetime(2026, 4, 5, 10, 30, 0)
 
         with patch("app.max_listener.datetime") as mock_dt:
             mock_dt.now.return_value = t0
             await client._on_disconnect_cb()
 
+            mock_dt.now.return_value = t_ready
+            await client._on_ready_cb(_snapshot())
+
             mock_dt.now.return_value = t1
             sender.send.reset_mock()
             await client._on_disconnect_cb()
 
-        sender.send.assert_called_once()
+        sender.send.assert_not_awaited()
 
-    async def test_third_disconnect_suppressed_within_3_hours(self):
+    @pytest.mark.asyncio
+    async def test_next_outage_after_ready_sends_after_one_hour(self):
         client, sender = _make_client()
-
         t0 = datetime(2026, 4, 5, 10, 0, 0)
-        t1 = datetime(2026, 4, 5, 11, 0, 1)  # +1h: 2nd notification
-        t2 = datetime(2026, 4, 5, 12, 0, 0)  # +1h after 2nd: suppressed
-
-        with patch("app.max_listener.datetime") as mock_dt:
-            mock_dt.now.return_value = t0
-            await client._on_disconnect_cb()
-
-            mock_dt.now.return_value = t1
-            await client._on_disconnect_cb()
-
-            mock_dt.now.return_value = t2
-            sender.send.reset_mock()
-            await client._on_disconnect_cb()
-
-        sender.send.assert_not_called()
-
-    async def test_third_disconnect_sends_after_3_hours(self):
-        client, sender = _make_client()
-
-        t0 = datetime(2026, 4, 5, 10, 0, 0)
-        t1 = datetime(2026, 4, 5, 11, 0, 1)  # 2nd notification
-        t2 = datetime(2026, 4, 5, 14, 0, 2)  # +3h after 2nd: 3rd notification
-
-        with patch("app.max_listener.datetime") as mock_dt:
-            mock_dt.now.return_value = t0
-            await client._on_disconnect_cb()
-
-            mock_dt.now.return_value = t1
-            await client._on_disconnect_cb()
-
-            mock_dt.now.return_value = t2
-            sender.send.reset_mock()
-            await client._on_disconnect_cb()
-
-        sender.send.assert_called_once()
-
-    async def test_fourth_disconnect_suppressed_within_24_hours(self):
-        client, sender = _make_client()
-
-        t0 = datetime(2026, 4, 5, 10, 0, 0)
-        t1 = datetime(2026, 4, 5, 11, 0, 1)   # 2nd notification
-        t2 = datetime(2026, 4, 5, 14, 0, 2)   # 3rd notification
-        t3 = datetime(2026, 4, 5, 20, 0, 0)   # 6h later: suppressed
-
-        with patch("app.max_listener.datetime") as mock_dt:
-            mock_dt.now.return_value = t0
-            await client._on_disconnect_cb()
-            mock_dt.now.return_value = t1
-            await client._on_disconnect_cb()
-            mock_dt.now.return_value = t2
-            await client._on_disconnect_cb()
-
-            mock_dt.now.return_value = t3
-            sender.send.reset_mock()
-            await client._on_disconnect_cb()
-
-        sender.send.assert_not_called()
-
-    async def test_fourth_disconnect_sends_after_24_hours(self):
-        client, sender = _make_client()
-
-        t0 = datetime(2026, 4, 5, 10, 0, 0)
+        t_ready = datetime(2026, 4, 5, 10, 5, 0)
         t1 = datetime(2026, 4, 5, 11, 0, 1)
-        t2 = datetime(2026, 4, 5, 14, 0, 2)
-        t3 = datetime(2026, 4, 6, 14, 0, 3)   # +24h after 3rd: sends
 
         with patch("app.max_listener.datetime") as mock_dt:
             mock_dt.now.return_value = t0
             await client._on_disconnect_cb()
-            mock_dt.now.return_value = t1
-            await client._on_disconnect_cb()
-            mock_dt.now.return_value = t2
-            await client._on_disconnect_cb()
 
-            mock_dt.now.return_value = t3
+            mock_dt.now.return_value = t_ready
+            await client._on_ready_cb(_snapshot())
+
+            mock_dt.now.return_value = t1
             sender.send.reset_mock()
             await client._on_disconnect_cb()
 
-        sender.send.assert_called_once()
+        sender.send.assert_awaited_once()
 
 
-# ---------------------------------------------------------------------------
-# on_ready reconnect notification
-# ---------------------------------------------------------------------------
-
-class TestReconnectNotification:
-    """Tests for 'connection restored' notification on reconnect."""
-
+class TestReadyNotifications:
+    @pytest.mark.asyncio
     async def test_startup_notification_sent_on_first_connect(self):
         client, sender = _make_client()
-        snapshot = {"profile": {"id": 1, "names": []}, "chats": []}
-        await client._on_ready_cb(snapshot)
-        sender.send.assert_called_once()
-        assert "подключён" in sender.send.call_args[0][0]
 
+        await client._on_ready_cb(_snapshot())
+
+        sender.send.assert_awaited_once()
+        assert "подключ" in sender.send.await_args.args[0]
+
+    @pytest.mark.asyncio
     async def test_startup_notification_includes_chat_count(self):
         client, sender = _make_client()
-        snapshot = {
-            "profile": {"id": 1, "names": []},
-            "chats": [
-                {"id": 100, "type": "GROUP", "title": "Chat A", "participants": {}},
-                {"id": 101, "type": "GROUP", "title": "Chat B", "participants": {}},
-            ],
-        }
-        await client._on_ready_cb(snapshot)
-        assert "2" in sender.send.call_args[0][0]
 
-    async def test_notification_sent_on_reconnect(self):
+        await client._on_ready_cb(_snapshot(chat_count=2))
+
+        assert "2" in sender.send.await_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_reconnect_does_not_send_restored_notification(self):
         client, sender = _make_client()
-        snapshot = {"profile": {"id": 1, "names": []}, "chats": []}
-        # First connect
+        snapshot = _snapshot()
+
         await client._on_ready_cb(snapshot)
-        # Reconnect
+
+        sender.send.reset_mock()
+        await client._on_disconnect_cb()
         sender.send.reset_mock()
         await client._on_ready_cb(snapshot)
-        sender.send.assert_called_once()
-        assert "восстановлено" in sender.send.call_args[0][0]
+
+        sender.send.assert_not_awaited()

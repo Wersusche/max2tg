@@ -24,33 +24,37 @@ class ContactResolver:
         self._my_id: Any = None
 
     def chat_name(self, chat_id: Any) -> str:
-        return self.chats.get(chat_id, str(chat_id))
+        normalized_chat_id = self._normalize_id(chat_id)
+        return self.chats.get(normalized_chat_id, str(normalized_chat_id))
 
     def is_dm(self, chat_id: Any) -> bool:
-        return self.chat_types.get(chat_id) == "DIALOG"
+        normalized_chat_id = self._normalize_id(chat_id)
+        return self.chat_types.get(normalized_chat_id) == "DIALOG"
 
     def user_name(self, user_id: Any) -> str:
-        return self.users.get(user_id, str(user_id))
+        normalized_user_id = self._normalize_id(user_id)
+        return self.users.get(normalized_user_id, str(normalized_user_id))
 
     async def resolve_user(self, user_id: Any) -> str:
-        if user_id in self.users:
-            return self.users[user_id]
-        if self._is_fetch_failed(user_id):
-            return str(user_id)
+        normalized_user_id = self._normalize_id(user_id)
+        if normalized_user_id in self.users:
+            return self.users[normalized_user_id]
+        if self._is_fetch_failed(normalized_user_id):
+            return str(normalized_user_id)
 
-        fetch_succeeded = await self._ws_fetch_contacts([user_id])
+        fetch_succeeded = await self._ws_fetch_contacts([normalized_user_id])
 
-        if user_id in self.users:
-            return self.users[user_id]
+        if normalized_user_id in self.users:
+            return self.users[normalized_user_id]
         if fetch_succeeded:
-            self._mark_fetch_failed(user_id)
-        return str(user_id)
+            self._mark_fetch_failed(normalized_user_id)
+        return str(normalized_user_id)
 
     async def resolve_users_batch(self, user_ids: list) -> None:
         """Pre-fetch a batch of unknown user IDs in one WS call."""
         unknown = [
             uid
-            for uid in user_ids
+            for uid in dict.fromkeys(self._normalize_id(raw_uid) for raw_uid in user_ids)
             if uid not in self.users and not self._is_fetch_failed(uid)
         ]
         if unknown:
@@ -64,9 +68,9 @@ class ContactResolver:
 
     def load_snapshot(self, snapshot: dict) -> list:
         profile = snapshot.get("profile", {})
-        self._my_id = profile.get("id")
+        self._my_id = self._normalize_id(profile.get("id"))
         names = profile.get("names", [])
-        if names and self._my_id:
+        if names and self._my_id is not None:
             n = names[0]
             first = n.get("firstName", "")
             last = n.get("lastName", "")
@@ -75,7 +79,7 @@ class ContactResolver:
         all_participant_ids: set[int] = set()
 
         for chat in snapshot.get("chats", []):
-            cid = chat.get("id")
+            cid = self._normalize_id(chat.get("id"))
             ctype = chat.get("type")
             title = chat.get("title")
 
@@ -90,22 +94,20 @@ class ContactResolver:
 
             participants = chat.get("participants", {})
             for uid_str in participants:
-                try:
-                    all_participant_ids.add(int(uid_str))
-                except (ValueError, TypeError):
-                    pass
+                normalized_uid = self._normalize_id(uid_str)
+                if isinstance(normalized_uid, int):
+                    all_participant_ids.add(normalized_uid)
 
-            if not title and ctype == "DIALOG" and self._my_id:
+            if not title and ctype == "DIALOG" and self._my_id is not None:
                 peer_id = None
                 for uid in participants:
-                    try:
-                        uid_int = int(uid)
-                    except (ValueError, TypeError):
+                    uid_int = self._normalize_id(uid)
+                    if not isinstance(uid_int, int):
                         continue
                     if uid_int != self._my_id:
                         peer_id = uid_int
                         break
-                if peer_id:
+                if peer_id is not None:
                     self.chats[cid] = f"DM:{peer_id}"
 
         log.info(
@@ -139,17 +141,17 @@ class ContactResolver:
         for c in contacts:
             if not isinstance(c, dict):
                 continue
-            uid = c.get("id") or c.get("userId")
+            uid = self._normalize_id(self._contact_id_from_mapping(c))
             name = self._extract_name_from_contact(c)
             if uid is not None and name:
                 self.users[uid] = name
                 log.info("Resolved contact %s → %s", uid, name)
 
         # Maybe the response IS the contact (single user)
-        if not contacts and resp.get("id"):
-            uid = resp.get("id")
+        if not contacts and self._contact_id_from_mapping(resp) is not None:
+            uid = self._normalize_id(self._contact_id_from_mapping(resp))
             name = self._extract_name_from_contact(resp)
-            if uid and name:
+            if uid is not None and name:
                 self.users[uid] = name
                 log.info("Resolved contact %s → %s", uid, name)
 
@@ -160,7 +162,7 @@ class ContactResolver:
         if depth > 5:
             return
         if isinstance(obj, dict):
-            uid = obj.get("id") or obj.get("userId")
+            uid = self._normalize_id(self._contact_id_from_mapping(obj))
             name = self._extract_name_from_contact(obj)
             if uid is not None and name and uid not in self.users:
                 self.users[uid] = name
@@ -192,13 +194,34 @@ class ContactResolver:
         return str(c.get("friendly") or c.get("displayName") or c.get("name") or "")
 
     def _is_fetch_failed(self, user_id: Any) -> bool:
-        expires_at = self._fetch_failed_until.get(user_id)
+        normalized_user_id = self._normalize_id(user_id)
+        expires_at = self._fetch_failed_until.get(normalized_user_id)
         if expires_at is None:
             return False
         if expires_at > time.monotonic():
             return True
-        self._fetch_failed_until.pop(user_id, None)
+        self._fetch_failed_until.pop(normalized_user_id, None)
         return False
 
     def _mark_fetch_failed(self, user_id: Any) -> None:
-        self._fetch_failed_until[user_id] = time.monotonic() + self.FETCH_FAILED_TTL_SEC
+        normalized_user_id = self._normalize_id(user_id)
+        self._fetch_failed_until[normalized_user_id] = time.monotonic() + self.FETCH_FAILED_TTL_SEC
+
+    @staticmethod
+    def _normalize_id(value: Any) -> Any:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            normalized_value = value.strip()
+            if normalized_value and normalized_value.lstrip("-").isdigit():
+                return int(normalized_value)
+            return normalized_value
+        return value
+
+    @staticmethod
+    def _contact_id_from_mapping(payload: dict) -> Any:
+        if payload.get("id") is not None:
+            return payload.get("id")
+        return payload.get("userId")
