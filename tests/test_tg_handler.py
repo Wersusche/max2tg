@@ -336,6 +336,35 @@ class TestOnTopicMessage:
         message_store.close()
 
     @pytest.mark.asyncio
+    async def test_image_document_stays_document_when_sent_to_max(self, tmp_path):
+        ctx, topic_store, message_store, max_client = self._make_context(tmp_path)
+        max_client.send_document = AsyncMock(return_value={"ok": True})
+        tg_file = MagicMock()
+        tg_file.file_path = "photos/image.jpg"
+        tg_file.download_as_bytearray = AsyncMock(return_value=bytearray(b"image-bytes"))
+        document = MagicMock()
+        document.file_name = "image.jpg"
+        document.get_file = AsyncMock(return_value=tg_file)
+        update = _make_topic_update(
+            text=None,
+            caption=None,
+            attachment=object(),
+            document=document,
+            user_name="Carol",
+        )
+
+        await _on_topic_message(update, ctx)
+
+        max_client.send_photo.assert_not_called()
+        max_client.send_document.assert_awaited_once()
+        call_args = max_client.send_document.await_args
+        assert call_args.args[0] == 42
+        assert call_args.args[1] == b"image-bytes"
+        assert call_args.kwargs["filename"] == "image.jpg"
+        topic_store.close()
+        message_store.close()
+
+    @pytest.mark.asyncio
     async def test_unknown_topic_warns_and_does_not_send(self, tmp_path):
         ctx, topic_store, message_store, max_client = self._make_context(tmp_path, mapping=False)
         update = _make_topic_update(text="Hello")

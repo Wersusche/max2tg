@@ -3,8 +3,38 @@
 import asyncio
 
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from app.max_client import MaxClient, MaxMessage, OpCode, _HTTP_HEADERS
+
+
+class _FakeResponse:
+    def __init__(self, *, status: int, payload: dict | None = None, text: str = ""):
+        self.status = status
+        self._payload = payload or {}
+        self._text = text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def json(self, content_type=None):
+        return self._payload
+
+    async def text(self):
+        return self._text
+
+
+class _FakeSession:
+    def __init__(self, response: _FakeResponse):
+        self.response = response
+        self.closed = False
+        self.calls: list[tuple[str, dict]] = []
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.response
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +366,7 @@ class TestSendHelpers:
     async def test_send_document_uploads_and_sends_attach(self):
         client = MaxClient(token="tok", device_id="dev")
         client.upload_document = AsyncMock(return_value={"_type": "FILE", "fileToken": "abc", "name": "report.pdf"})
-        client.send_message = AsyncMock(return_value={"ok": True})
+        client._send_document_attach = AsyncMock(return_value={"ok": True})
 
         await client.send_document(
             42,
@@ -347,12 +377,118 @@ class TestSendHelpers:
         )
 
         client.upload_document.assert_awaited_once_with(42, b"file-bytes", filename="report.pdf")
-        client.send_message.assert_awaited_once_with(
+        client._send_document_attach.assert_awaited_once_with(
             42,
             "hello",
             [{"type": "STRONG"}],
-            attaches=[{"_type": "FILE", "fileToken": "abc", "name": "report.pdf"}],
+            {"_type": "FILE", "fileToken": "abc", "name": "report.pdf"},
             reply_to_max_message_id=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_message_returns_empty_on_cmd_error(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client.cmd = AsyncMock(return_value=MaxClient._wrap_cmd_error({"code": "forbidden"}))
+
+        payload = await client.send_message(42, "hello")
+
+        assert payload == {}
+
+    @pytest.mark.asyncio
+    async def test_send_document_retries_when_attachment_not_ready(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client.upload_document = AsyncMock(return_value={"_type": "FILE", "fileToken": "abc", "name": "report.pdf"})
+        client._send_message_request = AsyncMock(
+            side_effect=[
+                MaxClient._wrap_cmd_error({"code": "attachment.not.ready"}),
+                {"message": {"id": "max-1"}},
+            ]
+        )
+
+        with patch("app.max_client.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            payload = await client.send_document(42, b"file-bytes", filename="report.pdf")
+
+        assert payload == {"message": {"id": "max-1"}}
+        assert client._send_message_request.await_count == 2
+        sleep_mock.assert_awaited_once_with(0.5)
+
+    @pytest.mark.asyncio
+    async def test_send_document_stops_after_attachment_not_ready_retries(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client._send_message_request = AsyncMock(
+            side_effect=[
+                MaxClient._wrap_cmd_error({"code": "attachment.not.ready"}),
+                MaxClient._wrap_cmd_error({"code": "attachment.not.ready"}),
+                MaxClient._wrap_cmd_error({"code": "attachment.not.ready"}),
+                MaxClient._wrap_cmd_error({"code": "attachment.not.ready"}),
+                MaxClient._wrap_cmd_error({"code": "attachment.not.ready"}),
+            ]
+        )
+
+        with patch("app.max_client.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+            payload = await client._send_document_attach(
+                42,
+                "hello",
+                [{"type": "STRONG"}],
+                {"_type": "FILE", "fileToken": "abc", "name": "report.pdf"},
+            )
+
+        assert payload == {}
+        assert client._send_message_request.await_count == 5
+        assert [call.args[0] for call in sleep_mock.await_args_list] == [0.5, 1.0, 2.0, 4.0]
+
+    @pytest.mark.asyncio
+    async def test_request_upload_url_uses_platform_api_authorization(self):
+        client = MaxClient(token="tok", device_id="dev")
+        session = _FakeSession(_FakeResponse(status=200, payload={"url": "https://upload.example/file"}))
+        client._session = session
+
+        payload = await client._request_upload_url("file")
+
+        assert payload == {"url": "https://upload.example/file"}
+        url, kwargs = session.calls[0]
+        assert url.endswith("/uploads")
+        assert kwargs["params"] == {"type": "file"}
+        assert kwargs["headers"]["Authorization"] == "tok"
+        assert kwargs["headers"]["Accept"] == "application/json"
+
+    @pytest.mark.asyncio
+    async def test_upload_document_uses_file_upload_endpoint_and_data_field(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client._request_upload_url = AsyncMock(return_value={"url": "https://upload.example/file"})
+        client._upload_bytes = AsyncMock(return_value={"token": "file-token"})
+
+        payload = await client.upload_document(42, b"file-bytes", filename="report.pdf")
+
+        assert payload == {"_type": "FILE", "fileToken": "file-token", "name": "report.pdf"}
+        client._request_upload_url.assert_awaited_once_with("file")
+        client._upload_bytes.assert_awaited_once_with(
+            "https://upload.example/file",
+            b"file-bytes",
+            filename="report.pdf",
+            content_type="application/pdf",
+            field_name="data",
+            headers=ANY,
+        )
+        headers = client._upload_bytes.await_args.kwargs["headers"]
+        assert headers["Authorization"] == "tok"
+
+    @pytest.mark.asyncio
+    async def test_upload_photo_keeps_legacy_upload_flow(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client.cmd = AsyncMock(side_effect=[{"url": "https://upload.example/photo"}, {"ok": True}])
+        client._upload_bytes = AsyncMock(return_value={"photos": {"0": {"token": "photo-token"}}})
+
+        payload = await client.upload_photo(42, b"image-bytes", filename="pic.jpg")
+
+        assert payload == {"_type": "PHOTO", "photoToken": "photo-token"}
+        assert client.cmd.await_args_list[0].args == (OpCode.PHOTO_UPLOAD_URL, {"count": 1})
+        assert client.cmd.await_args_list[1].args == (OpCode.UPLOAD_ATTACH, {"chatId": 42, "type": "PHOTO"})
+        client._upload_bytes.assert_awaited_once_with(
+            "https://upload.example/photo",
+            b"image-bytes",
+            filename="pic.jpg",
+            content_type="image/jpeg",
         )
 
     def test_extract_sent_message_id_prefers_nested_message_payload(self):
