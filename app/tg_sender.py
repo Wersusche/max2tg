@@ -66,6 +66,7 @@ class TelegramSender:
         text: str,
         reply_markup=None,
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
         raise_bad_request: bool = False,
     ):
         if not text:
@@ -81,6 +82,8 @@ class TelegramSender:
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup,
                 message_thread_id=message_thread_id,
+                reply_to_message_id=reply_to_message_id,
+                allow_sending_without_reply=True if reply_to_message_id is not None else None,
             ),
             raise_bad_request=raise_bad_request,
         )
@@ -92,6 +95,7 @@ class TelegramSender:
         filename: str = "photo.jpg",
         reply_markup=None,
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
         raise_bad_request: bool = False,
     ):
         caption = self._truncate_caption(caption)
@@ -103,6 +107,8 @@ class TelegramSender:
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup,
                 message_thread_id=message_thread_id,
+                reply_to_message_id=reply_to_message_id,
+                allow_sending_without_reply=True if reply_to_message_id is not None else None,
             ),
             raise_bad_request=raise_bad_request,
         )
@@ -114,6 +120,7 @@ class TelegramSender:
         filename: str = "file",
         reply_markup=None,
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
         raise_bad_request: bool = False,
     ):
         caption = self._truncate_caption(caption)
@@ -125,6 +132,8 @@ class TelegramSender:
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup,
                 message_thread_id=message_thread_id,
+                reply_to_message_id=reply_to_message_id,
+                allow_sending_without_reply=True if reply_to_message_id is not None else None,
             ),
             raise_bad_request=raise_bad_request,
         )
@@ -136,6 +145,7 @@ class TelegramSender:
         filename: str = "video.mp4",
         reply_markup=None,
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
         raise_bad_request: bool = False,
     ):
         caption = self._truncate_caption(caption)
@@ -147,6 +157,8 @@ class TelegramSender:
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup,
                 message_thread_id=message_thread_id,
+                reply_to_message_id=reply_to_message_id,
+                allow_sending_without_reply=True if reply_to_message_id is not None else None,
             ),
             raise_bad_request=raise_bad_request,
         )
@@ -157,6 +169,7 @@ class TelegramSender:
         caption: str = "",
         reply_markup=None,
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
         raise_bad_request: bool = False,
     ):
         caption = self._truncate_caption(caption)
@@ -168,6 +181,8 @@ class TelegramSender:
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup,
                 message_thread_id=message_thread_id,
+                reply_to_message_id=reply_to_message_id,
+                allow_sending_without_reply=True if reply_to_message_id is not None else None,
             ),
             raise_bad_request=raise_bad_request,
         )
@@ -181,6 +196,8 @@ class TelegramSender:
                     parse_mode=ParseMode.HTML,
                     reply_markup=reply_markup,
                     message_thread_id=message_thread_id,
+                    reply_to_message_id=reply_to_message_id,
+                    allow_sending_without_reply=True if reply_to_message_id is not None else None,
                 ),
                 raise_bad_request=raise_bad_request,
             )
@@ -191,6 +208,7 @@ class TelegramSender:
         data: bytes,
         reply_markup=None,
         message_thread_id: int | None = None,
+        reply_to_message_id: int | None = None,
         raise_bad_request: bool = False,
     ):
         return await self._retry(
@@ -199,6 +217,8 @@ class TelegramSender:
                 sticker=InputFile(io.BytesIO(data), filename="sticker.webp"),
                 reply_markup=reply_markup,
                 message_thread_id=message_thread_id,
+                reply_to_message_id=reply_to_message_id,
+                allow_sending_without_reply=True if reply_to_message_id is not None else None,
             ),
             raise_bad_request=raise_bad_request,
         )

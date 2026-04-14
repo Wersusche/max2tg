@@ -8,6 +8,7 @@ from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 
 from app.command_store import CommandStore
+from app.message_store import MessageStore
 from app.relay_models import RelayOperation, TelegramBatch
 from app.relay_server import RelayBatchProcessor, create_relay_app
 from app.topic_router import TopicRouter
@@ -32,17 +33,18 @@ async def _make_client(tmp_path):
     sender = _make_sender()
     topic_store = TopicStore(str(tmp_path / "topics.sqlite3"))
     command_store = CommandStore(str(tmp_path / "commands.sqlite3"))
-    processor = RelayBatchProcessor(sender, TopicRouter(topic_store, sender))
-    app = create_relay_app(processor, command_store, "secret")
+    message_store = MessageStore(str(tmp_path / "messages.sqlite3"))
+    processor = RelayBatchProcessor(sender, TopicRouter(topic_store, sender), message_store)
+    app = create_relay_app(processor, command_store, message_store, "secret")
     server = TestServer(app)
     client = TestClient(server)
     await client.start_server()
-    return client, sender, topic_store, command_store
+    return client, sender, topic_store, command_store, message_store
 
 
 @pytest.mark.asyncio
 async def test_relay_rejects_invalid_secret(tmp_path):
-    client, _sender, topic_store, command_store = await _make_client(tmp_path)
+    client, _sender, topic_store, command_store, message_store = await _make_client(tmp_path)
     try:
         resp = await client.get("/internal/max-commands/pull", headers={"X-Relay-Secret": "wrong"})
         assert resp.status == 401
@@ -50,15 +52,17 @@ async def test_relay_rejects_invalid_secret(tmp_path):
         await client.close()
         topic_store.close()
         command_store.close()
+        message_store.close()
 
 
 @pytest.mark.asyncio
 async def test_relay_processes_multipart_photo_batch(tmp_path):
-    client, sender, topic_store, command_store = await _make_client(tmp_path)
+    client, sender, topic_store, command_store, message_store = await _make_client(tmp_path)
     try:
         batch = TelegramBatch(
             max_chat_id="42",
             topic_name="Alice",
+            max_message_id="max-1",
             operations=[
                 RelayOperation(
                     kind="photo",
@@ -81,15 +85,17 @@ async def test_relay_processes_multipart_photo_batch(tmp_path):
         sender.send_photo.assert_awaited_once()
         assert sender.send_photo.await_args.kwargs["message_thread_id"] == 55
         assert topic_store.get_by_max_chat(-100, 42).message_thread_id == 55
+        assert message_store.get_by_max_message(max_chat_id=42, max_message_id="max-1") is None
     finally:
         await client.close()
         topic_store.close()
         command_store.close()
+        message_store.close()
 
 
 @pytest.mark.asyncio
 async def test_relay_pulls_and_acks_command(tmp_path):
-    client, _sender, topic_store, command_store = await _make_client(tmp_path)
+    client, _sender, topic_store, command_store, message_store = await _make_client(tmp_path)
     try:
         queued = command_store.enqueue(42, "Hello", [{"type": "STRONG"}])
 
@@ -110,11 +116,12 @@ async def test_relay_pulls_and_acks_command(tmp_path):
         await client.close()
         topic_store.close()
         command_store.close()
+        message_store.close()
 
 
 @pytest.mark.asyncio
 async def test_relay_pulls_photo_command_with_attachment(tmp_path):
-    client, _sender, topic_store, command_store = await _make_client(tmp_path)
+    client, _sender, topic_store, command_store, message_store = await _make_client(tmp_path)
     try:
         queued = command_store.enqueue_photo(42, b"image-bytes", caption="Photo", filename="pic.jpg")
 
@@ -129,3 +136,39 @@ async def test_relay_pulls_photo_command_with_attachment(tmp_path):
         await client.close()
         topic_store.close()
         command_store.close()
+        message_store.close()
+
+
+@pytest.mark.asyncio
+async def test_relay_stores_message_mapping_and_exposes_lookup(tmp_path):
+    client, sender, topic_store, command_store, message_store = await _make_client(tmp_path)
+    sender.send = AsyncMock(return_value=SimpleNamespace(message_id=7001))
+    try:
+        batch = TelegramBatch(
+            max_chat_id="42",
+            topic_name="Alice",
+            max_message_id="max-42",
+            operations=[RelayOperation(kind="text", text="Hello from Max")],
+        )
+
+        resp = await client.post(
+            "/internal/telegram-batch",
+            json=batch.to_dict(),
+            headers={"X-Relay-Secret": "secret"},
+        )
+        assert resp.status == 200
+
+        lookup = await client.get(
+            "/internal/message-mappings/lookup",
+            params={"max_chat_id": "42", "max_message_id": "max-42"},
+            headers={"X-Relay-Secret": "secret"},
+        )
+        assert lookup.status == 200
+        payload = await lookup.json()
+        assert payload["tg_message_id"] == 7001
+        assert payload["message_thread_id"] == 55
+    finally:
+        await client.close()
+        topic_store.close()
+        command_store.close()
+        message_store.close()

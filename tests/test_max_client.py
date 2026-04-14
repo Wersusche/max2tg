@@ -312,6 +312,28 @@ class TestSendHelpers:
             attaches=[{"_type": "PHOTO", "photoToken": "abc"}],
         )
 
+    @pytest.mark.asyncio
+    async def test_send_document_uploads_and_sends_attach(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client.upload_document = AsyncMock(return_value={"_type": "FILE", "fileToken": "abc", "name": "report.pdf"})
+        client.send_message = AsyncMock(return_value={"ok": True})
+
+        await client.send_document(
+            42,
+            b"file-bytes",
+            caption="hello",
+            elements=[{"type": "STRONG"}],
+            filename="report.pdf",
+        )
+
+        client.upload_document.assert_awaited_once_with(42, b"file-bytes", filename="report.pdf")
+        client.send_message.assert_awaited_once_with(
+            42,
+            "hello",
+            [{"type": "STRONG"}],
+            attaches=[{"_type": "FILE", "fileToken": "abc", "name": "report.pdf"}],
+        )
+
 
 class TestDispatchQueue:
     @pytest.mark.asyncio

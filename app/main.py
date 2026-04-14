@@ -13,6 +13,7 @@ from telegram import Update
 from app.command_store import CommandStore
 from app.config import APP_ROLE_MAX_BRIDGE, APP_ROLE_TG_RELAY, load_settings
 from app.max_listener import create_max_client
+from app.message_store import MessageStore
 from app.relay_client import RelayClient, RelayStatusSender
 from app.relay_server import RelayBatchProcessor, create_relay_app
 from app.remote_deploy import RemoteRelayManager
@@ -85,6 +86,14 @@ async def _relay_command_loop(relay_client: RelayClient, max_client) -> None:
                     elements=command.elements,
                     filename=command.filename or "photo.jpg",
                 )
+            elif command.kind == "document":
+                response = await max_client.send_document(
+                    max_chat_id,
+                    command.attachment or b"",
+                    caption=command.text,
+                    elements=command.elements,
+                    filename=command.filename or "file",
+                )
             else:
                 response = await max_client.send_message(
                     max_chat_id,
@@ -122,8 +131,13 @@ async def _command_lease_maintenance_loop(
             await asyncio.sleep(interval_seconds)
 
 
-async def _start_relay_http_server(settings, processor: RelayBatchProcessor, command_store: CommandStore) -> web.AppRunner:
-    app = create_relay_app(processor, command_store, settings.relay_shared_secret)
+async def _start_relay_http_server(
+    settings,
+    processor: RelayBatchProcessor,
+    command_store: CommandStore,
+    message_store: MessageStore,
+) -> web.AppRunner:
+    app = create_relay_app(processor, command_store, message_store, settings.relay_shared_secret)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host=settings.relay_bind_host, port=settings.relay_bind_port)
@@ -193,9 +207,10 @@ async def _run_tg_relay(settings) -> None:
     await sender.start()
     topic_store = TopicStore(settings.topic_db_path)
     command_store = CommandStore(settings.command_db_path)
+    message_store = MessageStore(settings.message_db_path)
     topic_router = TopicRouter(topic_store, sender)
-    processor = RelayBatchProcessor(sender, topic_router)
-    http_runner = await _start_relay_http_server(settings, processor, command_store)
+    processor = RelayBatchProcessor(sender, topic_router, message_store)
+    http_runner = await _start_relay_http_server(settings, processor, command_store, message_store)
     lease_maintenance_task = asyncio.create_task(_command_lease_maintenance_loop(command_store))
 
     tg_app = None
@@ -231,6 +246,7 @@ async def _run_tg_relay(settings) -> None:
         await http_runner.cleanup()
         command_store.close()
         topic_store.close()
+        message_store.close()
         await sender.stop()
 
 

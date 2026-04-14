@@ -126,6 +126,64 @@ class CommandStore:
             attachment=bytes(photo),
         )
 
+    def enqueue_document(
+        self,
+        max_chat_id: Any,
+        document: bytes,
+        caption: str = "",
+        elements: list[dict[str, Any]] | None = None,
+        filename: str = "file",
+    ) -> MaxCommand:
+        return self.enqueue_attachment(
+            max_chat_id,
+            kind="document",
+            attachment=document,
+            text=caption,
+            elements=elements,
+            filename=filename,
+        )
+
+    def enqueue_attachment(
+        self,
+        max_chat_id: Any,
+        *,
+        kind: str,
+        attachment: bytes,
+        text: str = "",
+        elements: list[dict[str, Any]] | None = None,
+        filename: str | None = None,
+    ) -> MaxCommand:
+        payload = json.dumps(elements or [], ensure_ascii=False)
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO max_commands (
+                    max_chat_id, kind, text, elements_json, filename, attachment_blob, leased_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    str(max_chat_id),
+                    str(kind),
+                    text,
+                    payload,
+                    filename,
+                    sqlite3.Binary(attachment),
+                ),
+            )
+            self._conn.commit()
+            command_id = int(cur.lastrowid)
+        self._notify_waiters()
+        return MaxCommand(
+            id=command_id,
+            max_chat_id=str(max_chat_id),
+            text=text,
+            kind=str(kind),
+            elements=list(elements or []),
+            filename=filename,
+            attachment=bytes(attachment),
+        )
+
     def lease_next(self) -> MaxCommand | None:
         with self._lock:
             row = self._conn.execute(
