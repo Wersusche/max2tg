@@ -19,14 +19,28 @@ REQUIRED_ARCHIVE_PATHS = (
 )
 
 IGNORED_ARCHIVE_PARTS = {
+    ".codex_deps",
     ".git",
+    ".tmp",
     ".venv",
     "__pycache__",
     ".pytest_cache",
     "logs",
     "data",
     "debug",
+    "pytest-fixtures",
+    "pytest-temp-files",
+    "tests",
 }
+IGNORED_ARCHIVE_ROOT_PATHS = {
+    Path("README.md"),
+    Path("conftest.py"),
+    Path("pytest.ini"),
+    Path("requirements-dev.txt"),
+}
+IGNORED_ARCHIVE_PREFIXES = (
+    "pytest-cache-files",
+)
 
 PORT_CONFLICT_MARKERS = (
     "failed to bind host port 127.0.0.1:",
@@ -164,8 +178,16 @@ class RemoteRelayManager:
             )
 
     def _should_skip(self, relative: Path) -> bool:
+        if relative in IGNORED_ARCHIVE_ROOT_PATHS:
+            return True
         parts = set(relative.parts)
         if parts & IGNORED_ARCHIVE_PARTS:
+            return True
+        if any(
+            part.startswith(prefix)
+            for part in relative.parts
+            for prefix in IGNORED_ARCHIVE_PREFIXES
+        ):
             return True
         if relative.name.endswith((".pyc", ".pyo")):
             return True

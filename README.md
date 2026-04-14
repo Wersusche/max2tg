@@ -386,7 +386,10 @@ docker compose up -d --build
 
 ## Тесты
 
+Для локальных проверок:
+
 ```bash
+python -m pip install -r requirements-dev.txt
 python -m pytest
 ```
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -12,12 +13,14 @@ log = logging.getLogger(__name__)
 
 
 class ContactResolver:
+    FETCH_FAILED_TTL_SEC = 300
+
     def __init__(self, client: MaxClient | None = None):
         self.chats: dict[Any, str] = {}
         self.chat_types: dict[Any, str] = {}
         self.users: dict[Any, str] = {}
         self._client = client
-        self._fetch_failed: set = set()
+        self._fetch_failed_until: dict[Any, float] = {}
         self._my_id: Any = None
 
     def chat_name(self, chat_id: Any) -> str:
@@ -32,21 +35,30 @@ class ContactResolver:
     async def resolve_user(self, user_id: Any) -> str:
         if user_id in self.users:
             return self.users[user_id]
-        if user_id in self._fetch_failed:
+        if self._is_fetch_failed(user_id):
             return str(user_id)
 
-        await self._ws_fetch_contacts([user_id])
+        fetch_succeeded = await self._ws_fetch_contacts([user_id])
 
         if user_id in self.users:
             return self.users[user_id]
-        self._fetch_failed.add(user_id)
+        if fetch_succeeded:
+            self._mark_fetch_failed(user_id)
         return str(user_id)
 
     async def resolve_users_batch(self, user_ids: list) -> None:
         """Pre-fetch a batch of unknown user IDs in one WS call."""
-        unknown = [uid for uid in user_ids if uid not in self.users and uid not in self._fetch_failed]
+        unknown = [
+            uid
+            for uid in user_ids
+            if uid not in self.users and not self._is_fetch_failed(uid)
+        ]
         if unknown:
-            await self._ws_fetch_contacts(unknown)
+            fetch_succeeded = await self._ws_fetch_contacts(unknown)
+            if fetch_succeeded:
+                for uid in unknown:
+                    if uid not in self.users:
+                        self._mark_fetch_failed(uid)
 
     # ── populate from AUTH_SNAPSHOT ────────────────────────────────
 
@@ -104,14 +116,16 @@ class ContactResolver:
 
     # ── WebSocket contact fetch ────────────────────────────────────
 
-    async def _ws_fetch_contacts(self, user_ids: list) -> None:
+    async def _ws_fetch_contacts(self, user_ids: list) -> bool:
         if not self._client:
-            return
+            return False
         try:
             resp = await self._client.fetch_contacts(user_ids)
             self._parse_contacts_response(resp)
+            return True
         except Exception:
             log.exception("Failed to fetch contacts via WS")
+            return False
 
     def _parse_contacts_response(self, resp: dict) -> None:
         """Parse the response from opcode 32 (CONTACT_GET)."""
@@ -176,3 +190,15 @@ class ContactResolver:
             return f"{first} {last}".strip()
 
         return str(c.get("friendly") or c.get("displayName") or c.get("name") or "")
+
+    def _is_fetch_failed(self, user_id: Any) -> bool:
+        expires_at = self._fetch_failed_until.get(user_id)
+        if expires_at is None:
+            return False
+        if expires_at > time.monotonic():
+            return True
+        self._fetch_failed_until.pop(user_id, None)
+        return False
+
+    def _mark_fetch_failed(self, user_id: Any) -> None:
+        self._fetch_failed_until[user_id] = time.monotonic() + self.FETCH_FAILED_TTL_SEC

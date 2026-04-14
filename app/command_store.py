@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,8 @@ class CommandStore:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._command_event: asyncio.Event | None = None
+        self._command_event_loop: asyncio.AbstractEventLoop | None = None
         self._migrate()
 
     def close(self) -> None:
@@ -82,6 +85,7 @@ class CommandStore:
             )
             self._conn.commit()
             command_id = int(cur.lastrowid)
+        self._notify_waiters()
         return MaxCommand(
             id=command_id,
             max_chat_id=str(max_chat_id),
@@ -111,6 +115,7 @@ class CommandStore:
             )
             self._conn.commit()
             command_id = int(cur.lastrowid)
+        self._notify_waiters()
         return MaxCommand(
             id=command_id,
             max_chat_id=str(max_chat_id),
@@ -121,18 +126,8 @@ class CommandStore:
             attachment=bytes(photo),
         )
 
-    def lease_next(self, lease_timeout_seconds: int = 60) -> MaxCommand | None:
-        expiry_expr = f"-{int(lease_timeout_seconds)} seconds"
+    def lease_next(self) -> MaxCommand | None:
         with self._lock:
-            self._conn.execute(
-                """
-                UPDATE max_commands
-                SET leased_at = NULL
-                WHERE leased_at IS NOT NULL
-                  AND leased_at <= datetime('now', ?)
-                """,
-                (expiry_expr,),
-            )
             row = self._conn.execute(
                 """
                 SELECT id, max_chat_id, kind, text, elements_json, filename, attachment_blob
@@ -162,6 +157,48 @@ class CommandStore:
             row = self._conn.execute("SELECT COUNT(*) AS c FROM max_commands").fetchone()
         return int(row["c"])
 
+    def reap_expired_leases(self, lease_timeout_seconds: int = 60) -> int:
+        expiry_expr = f"-{int(lease_timeout_seconds)} seconds"
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE max_commands
+                SET leased_at = NULL
+                WHERE leased_at IS NOT NULL
+                  AND leased_at <= datetime('now', ?)
+                """,
+                (expiry_expr,),
+            )
+            self._conn.commit()
+            updated = int(cur.rowcount or 0)
+        if updated:
+            self._notify_waiters()
+        return updated
+
+    async def wait_for_command(
+        self,
+        timeout_seconds: float = 30.0,
+    ) -> MaxCommand | None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout_seconds)
+
+        while True:
+            command = self.lease_next()
+            if command is not None:
+                return command
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return None
+
+            event = self._get_or_create_event()
+            try:
+                await asyncio.wait_for(event.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return None
+            finally:
+                event.clear()
+
     @staticmethod
     def _row_to_command(row: sqlite3.Row) -> MaxCommand:
         return MaxCommand(
@@ -173,3 +210,19 @@ class CommandStore:
             filename=row["filename"],
             attachment=bytes(row["attachment_blob"]) if row["attachment_blob"] is not None else None,
         )
+
+    def _get_or_create_event(self) -> asyncio.Event:
+        loop = asyncio.get_running_loop()
+        if self._command_event is None or self._command_event_loop is None or self._command_event_loop != loop:
+            self._command_event = asyncio.Event()
+            self._command_event_loop = loop
+        return self._command_event
+
+    def _notify_waiters(self) -> None:
+        if self._command_event is None or self._command_event_loop is None:
+            return
+        if self._command_event_loop.is_closed():
+            self._command_event = None
+            self._command_event_loop = None
+            return
+        self._command_event_loop.call_soon_threadsafe(self._command_event.set)

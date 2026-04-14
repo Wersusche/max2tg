@@ -103,6 +103,25 @@ async def _relay_command_loop(relay_client: RelayClient, max_client) -> None:
             await asyncio.sleep(5)
 
 
+async def _command_lease_maintenance_loop(
+    command_store: CommandStore,
+    *,
+    interval_seconds: float = 5.0,
+    lease_timeout_seconds: int = 60,
+) -> None:
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            requeued = command_store.reap_expired_leases(lease_timeout_seconds=lease_timeout_seconds)
+            if requeued:
+                log.warning("Requeued %d expired Telegram -> Max commands", requeued)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Command lease maintenance loop failed")
+            await asyncio.sleep(interval_seconds)
+
+
 async def _start_relay_http_server(settings, processor: RelayBatchProcessor, command_store: CommandStore) -> web.AppRunner:
     app = create_relay_app(processor, command_store, settings.relay_shared_secret)
     runner = web.AppRunner(app)
@@ -177,6 +196,7 @@ async def _run_tg_relay(settings) -> None:
     topic_router = TopicRouter(topic_store, sender)
     processor = RelayBatchProcessor(sender, topic_router)
     http_runner = await _start_relay_http_server(settings, processor, command_store)
+    lease_maintenance_task = asyncio.create_task(_command_lease_maintenance_loop(command_store))
 
     tg_app = None
     if settings.reply_enabled:
@@ -199,6 +219,11 @@ async def _run_tg_relay(settings) -> None:
     try:
         await asyncio.Future()
     finally:
+        lease_maintenance_task.cancel()
+        try:
+            await lease_maintenance_task
+        except asyncio.CancelledError:
+            pass
         if tg_app:
             await tg_app.updater.stop()
             await tg_app.stop()

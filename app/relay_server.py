@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from typing import Any
@@ -145,15 +144,10 @@ async def _pull_max_command(request: web.Request) -> web.Response:
     _authorize(request)
     command_store = request.app[COMMAND_STORE_KEY]
     timeout = _float_query(request, "timeout", 30.0)
-    deadline = asyncio.get_running_loop().time() + timeout
-
-    while True:
-        command = command_store.lease_next()
-        if command is not None:
-            return web.json_response(command.to_dict())
-        if asyncio.get_running_loop().time() >= deadline:
-            return web.Response(status=204)
-        await asyncio.sleep(0.5)
+    command = await command_store.wait_for_command(timeout)
+    if command is None:
+        return web.Response(status=204)
+    return web.json_response(command.to_dict())
 
 
 async def _ack_max_command(request: web.Request) -> web.Response:

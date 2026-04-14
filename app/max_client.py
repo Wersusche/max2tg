@@ -10,15 +10,11 @@ from typing import Any
 
 import aiohttp
 
+from app.max_dispatcher import MessageDispatchQueue
+
 log = logging.getLogger(__name__)
 
 DEBUG_DIR = "debug"
-
-
-def _log_task_exception(task: "asyncio.Task") -> None:
-    """Done-callback that logs any exception raised by a fire-and-forget task."""
-    if not task.cancelled() and task.exception() is not None:
-        log.exception("Unhandled exception in background task", exc_info=task.exception())
 
 
 _USER_AGENT = (
@@ -91,6 +87,8 @@ class MaxClient:
     WS_URL = "wss://ws-api.oneme.ru/websocket"
     HEARTBEAT_SEC = 30
     RECONNECT_SEC = 5
+    DISPATCH_QUEUE_SIZE = 128
+    DISPATCH_WORKERS = 4
 
     def __init__(self, token: str, device_id: str, chat_ids: str | None = None, debug: bool = False):
         self.token = token
@@ -106,6 +104,7 @@ class MaxClient:
         self._dispatch_counter = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._on_disconnect_cb = None
+        self._message_dispatcher: MessageDispatchQueue | None = None
         self.chat_ids: list[int] = []
         if chat_ids:
             self.chat_ids = list(map(int, map(str.strip, chat_ids.split(","))))
@@ -169,57 +168,60 @@ class MaxClient:
         if self.debug:
             os.makedirs(DEBUG_DIR, exist_ok=True)
 
-        async with aiohttp.ClientSession(headers=_BROWSER_HEADERS) as session:
-            self._session = session
-            while True:
-                try:
-                    log.info("Connecting to %s ...", self.WS_URL)
-                    async with session.ws_connect(self.WS_URL, headers=_WS_HEADERS) as ws:
-                        self._ws = ws
-                        self._seq = 0
+        try:
+            async with aiohttp.ClientSession(headers=_BROWSER_HEADERS) as session:
+                self._session = session
+                while True:
+                    try:
+                        log.info("Connecting to %s ...", self.WS_URL)
+                        async with session.ws_connect(self.WS_URL, headers=_WS_HEADERS) as ws:
+                            self._ws = ws
+                            self._seq = 0
+                            self._pending.clear()
+
+                            log.info("Connected. Sending handshake...")
+                            await self._send(
+                                OpCode.HANDSHAKE,
+                                {
+                                    "deviceId": self.device_id,
+                                    "userAgent": {
+                                        "deviceType": "WEB",
+                                        "deviceName": "Chrome 131.0.0.0",
+                                    },
+                                    "appVersion": "25.12.11",
+                                },
+                            )
+
+                            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+                            async for msg in ws:
+                                if msg.type == aiohttp.WSMsgType.TEXT:
+                                    await self._handle(json.loads(msg.data))
+                                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                                    log.warning("WebSocket closed/error: %s", msg.type)
+                                    break
+
+                    except Exception:
+                        log.exception("Connection error")
+
+                    finally:
+                        if self._heartbeat_task:
+                            self._heartbeat_task.cancel()
+                        for fut in self._pending.values():
+                            if not fut.done():
+                                fut.cancel()
                         self._pending.clear()
 
-                        log.info("Connected. Sending handshake...")
-                        await self._send(
-                            OpCode.HANDSHAKE,
-                            {
-                                "deviceId": self.device_id,
-                                "userAgent": {
-                                    "deviceType": "WEB",
-                                    "deviceName": "Chrome 131.0.0.0",
-                                },
-                                "appVersion": "25.12.11",
-                            },
-                        )
+                    if self._on_disconnect_cb:
+                        try:
+                            await self._on_disconnect_cb()
+                        except Exception:
+                            log.exception("on_disconnect callback error")
 
-                        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-
-                        async for msg in ws:
-                            if msg.type == aiohttp.WSMsgType.TEXT:
-                                await self._handle(json.loads(msg.data))
-                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                                log.warning("WebSocket closed/error: %s", msg.type)
-                                break
-
-                except Exception:
-                    log.exception("Connection error")
-
-                finally:
-                    if self._heartbeat_task:
-                        self._heartbeat_task.cancel()
-                    for fut in self._pending.values():
-                        if not fut.done():
-                            fut.cancel()
-                    self._pending.clear()
-
-                if self._on_disconnect_cb:
-                    try:
-                        await self._on_disconnect_cb()
-                    except Exception:
-                        log.exception("on_disconnect callback error")
-
-                log.info("Reconnecting in %ds...", self.RECONNECT_SEC)
-                await asyncio.sleep(self.RECONNECT_SEC)
+                    log.info("Reconnecting in %ds...", self.RECONNECT_SEC)
+                    await asyncio.sleep(self.RECONNECT_SEC)
+        finally:
+            await self._shutdown_message_dispatcher()
 
     async def _handle(self, data: dict):
         op = data.get("opcode")
@@ -269,8 +271,7 @@ class MaxClient:
                 if self._on_message_cb:
                     msg = self._parse_message(payload)
                     if msg is not None and ((not self.chat_ids) or (msg.chat_id in self.chat_ids)):
-                        task = asyncio.create_task(self._on_message_cb(msg))
-                        task.add_done_callback(_log_task_exception)
+                        await self._dispatch_message(msg)
             elif op in (OpCode.HEARTBEAT_PING,):
                 log.debug("Heartbeat op=%s", op)
             elif cmd not in (1, 3):
@@ -443,6 +444,27 @@ class MaxClient:
             msg.is_self = True
 
         return msg
+
+    async def _dispatch_message(self, msg: MaxMessage) -> None:
+        if self._message_dispatcher is None:
+            self._message_dispatcher = MessageDispatchQueue(
+                self._on_message_cb,
+                maxsize=self.DISPATCH_QUEUE_SIZE,
+                worker_count=self.DISPATCH_WORKERS,
+            )
+            await self._message_dispatcher.start()
+        await self._message_dispatcher.submit(msg)
+
+    async def wait_for_pending_dispatches(self) -> None:
+        if self._message_dispatcher is not None:
+            await self._message_dispatcher.join()
+
+    async def _shutdown_message_dispatcher(self) -> None:
+        if self._message_dispatcher is None:
+            return
+        await self._message_dispatcher.join()
+        await self._message_dispatcher.stop()
+        self._message_dispatcher = None
 
     @staticmethod
     def _dump_json(filename: str, data: dict) -> None:
