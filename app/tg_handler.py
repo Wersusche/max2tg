@@ -124,6 +124,34 @@ def _apply_reply_fallback_prefix(
     return prefix + text, _shift_elements(elements, len(prefix))
 
 
+def _is_topic_root_reply(message, replied_message) -> bool:
+    if getattr(replied_message, "forum_topic_created", None) is None:
+        return False
+
+    current_thread_id = getattr(message, "message_thread_id", None)
+    if current_thread_id is None:
+        return False
+
+    try:
+        normalized_thread_id = int(current_thread_id)
+    except (TypeError, ValueError):
+        return False
+
+    for candidate in (
+        getattr(replied_message, "message_thread_id", None),
+        getattr(replied_message, "message_id", None),
+    ):
+        if candidate is None:
+            continue
+        try:
+            if int(candidate) == normalized_thread_id:
+                return True
+        except (TypeError, ValueError):
+            continue
+
+    return False
+
+
 def _resolve_reply_target(
     *,
     message,
@@ -133,6 +161,8 @@ def _resolve_reply_target(
 ) -> tuple[str | None, str | None]:
     replied_message = getattr(message, "reply_to_message", None)
     if replied_message is None:
+        return None, None
+    if _is_topic_root_reply(message, replied_message):
         return None, None
 
     tg_message_id = getattr(replied_message, "message_id", None)
