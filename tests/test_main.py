@@ -45,6 +45,34 @@ async def test_relay_command_loop_sends_document_and_acks():
 
 
 @pytest.mark.asyncio
+async def test_relay_command_loop_does_not_ack_failed_document_send():
+    relay_client = MagicMock()
+    relay_client.pull_command = AsyncMock(
+        side_effect=[
+            MaxCommand(
+                id=3,
+                max_chat_id="42",
+                kind="document",
+                text="caption",
+                filename="report.pdf",
+                attachment=b"file-bytes",
+            ),
+            asyncio.CancelledError(),
+        ]
+    )
+    relay_client.ack_command = AsyncMock(return_value=None)
+    relay_client.upsert_message_mapping = AsyncMock(return_value=None)
+
+    max_client = MagicMock()
+    max_client.send_document = AsyncMock(return_value={})
+
+    with pytest.raises(asyncio.CancelledError):
+        await _relay_command_loop(relay_client, max_client)
+
+    relay_client.ack_command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_relay_command_loop_stores_tg_to_max_mapping_after_success():
     relay_client = MagicMock()
     relay_client.pull_command = AsyncMock(

@@ -52,6 +52,11 @@ _HTTP_HEADERS = {
     "Sec-Fetch-Site": "cross-site",
 }
 
+_PLATFORM_API_BASE_URL = "https://platform-api.max.ru"
+_CMD_ERROR_MARKER = "__cmd_error__"
+_ATTACHMENT_NOT_READY_CODE = "attachment.not.ready"
+_DOCUMENT_READY_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0)
+
 
 class OpCode(IntEnum):
     HEARTBEAT_PING = 1
@@ -242,7 +247,7 @@ class MaxClient:
         elif cmd == 3 and seq in self._pending:
             fut = self._pending.pop(seq)
             if not fut.done():
-                fut.set_result({})
+                fut.set_result(self._wrap_cmd_error(payload))
             log.warning("<<< ERROR op=%-4s seq=%s | %s", op, seq, payload)
         else:
             payload_preview = json.dumps(payload, ensure_ascii=False)
@@ -291,7 +296,7 @@ class MaxClient:
         log.info("fetch_contacts(%s) -> keys: %s", contact_ids, list(resp.keys()))
         return resp
 
-    async def send_message(
+    async def _send_message_request(
         self,
         chat_id,
         text: str,
@@ -299,7 +304,6 @@ class MaxClient:
         attaches=None,
         reply_to_max_message_id: str | None = None,
     ) -> dict:
-        """Send a message to a Max chat."""
         if elements is None:
             elements = []
         if attaches is None:
@@ -310,7 +314,7 @@ class MaxClient:
             message["attaches"] = attaches
         if reply_to_max_message_id is not None:
             message["link"] = {"type": "REPLY", "messageId": str(reply_to_max_message_id)}
-        resp = await self.cmd(
+        return await self.cmd(
             OpCode.SEND_MESSAGE,
             {
                 "chatId": chat_id,
@@ -318,6 +322,27 @@ class MaxClient:
                 "notify": True,
             },
         )
+
+    async def send_message(
+        self,
+        chat_id,
+        text: str,
+        elements=None,
+        attaches=None,
+        reply_to_max_message_id: str | None = None,
+    ) -> dict:
+        """Send a message to a Max chat."""
+        resp = await self._send_message_request(
+            chat_id,
+            text,
+            elements,
+            attaches=attaches,
+            reply_to_max_message_id=reply_to_max_message_id,
+        )
+        error_payload = self._extract_cmd_error(resp)
+        if error_payload is not None:
+            log.warning("send_message(chat=%s) failed: %s", chat_id, error_payload)
+            return {}
         log.info("send_message(chat=%s) -> %s", chat_id, "OK" if resp else "FAIL")
         return resp
 
@@ -363,11 +388,11 @@ class MaxClient:
         attach = await self.upload_document(chat_id, data, filename=filename)
         if not attach:
             return {}
-        return await self.send_message(
+        return await self._send_document_attach(
             chat_id,
             caption,
             elements,
-            attaches=[attach],
+            attach,
             reply_to_max_message_id=reply_to_max_message_id,
         )
 
@@ -386,6 +411,10 @@ class MaxClient:
                 "type": "PHOTO",
             },
         )
+        init_error = self._extract_cmd_error(init_payload)
+        if init_error is not None:
+            log.warning("Photo upload init failed for chat=%s: %s", chat_id, init_error)
+            return {}
         if init_payload == {}:
             log.warning("Photo upload init failed for chat=%s", chat_id)
             return {}
@@ -412,21 +441,10 @@ class MaxClient:
 
     async def upload_document(self, chat_id, data: bytes, filename: str = "file") -> dict:
         """Upload generic file bytes to Max and return attach payload for send_message."""
-        upload_info = await self.cmd(OpCode.PHOTO_UPLOAD_URL, {"count": 1})
+        upload_info = await self._request_upload_url("file")
         upload_url = upload_info.get("url")
         if not upload_url:
-            log.warning("Document upload URL missing for chat=%s: %s", chat_id, upload_info)
-            return {}
-
-        init_payload = await self.cmd(
-            OpCode.UPLOAD_ATTACH,
-            {
-                "chatId": chat_id,
-                "type": "FILE",
-            },
-        )
-        if init_payload == {}:
-            log.warning("Document upload init failed for chat=%s", chat_id)
+            log.warning("Document file upload URL missing for chat=%s: %s", chat_id, upload_info)
             return {}
 
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
@@ -435,19 +453,90 @@ class MaxClient:
             data,
             filename=filename,
             content_type=content_type,
+            field_name="data",
+            headers=self._platform_api_headers(),
         )
         if not response_payload:
             return {}
 
-        token = self._extract_upload_token(response_payload, container_keys=("files", "file", "attachments"))
-        if not token:
-            log.warning("Document upload token missing for chat=%s: %s", chat_id, response_payload)
-            return {}
+        attach = self._normalize_document_attach(response_payload, filename=filename)
+        if not attach:
+            log.warning("Document upload payload missing token for chat=%s: %s", chat_id, response_payload)
+        return attach
 
+    async def _send_document_attach(
+        self,
+        chat_id,
+        caption: str,
+        elements,
+        attach: dict,
+        *,
+        reply_to_max_message_id: str | None = None,
+    ) -> dict:
+        for attempt, delay in enumerate((0.0, *_DOCUMENT_READY_RETRY_DELAYS), start=1):
+            if delay:
+                log.warning(
+                    "Document attachment not ready for chat=%s attempt=%d; retrying send in %.1fs",
+                    chat_id,
+                    attempt - 1,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+            response = await self._send_message_request(
+                chat_id,
+                caption,
+                elements,
+                attaches=[attach],
+                reply_to_max_message_id=reply_to_max_message_id,
+            )
+            error_payload = self._extract_cmd_error(response)
+            if error_payload is None:
+                log.info("send_document(chat=%s) -> %s", chat_id, "OK" if response else "FAIL")
+                return response
+            if not self._is_attachment_not_ready_error(error_payload):
+                log.warning("send_document(chat=%s) failed: %s", chat_id, error_payload)
+                return {}
+
+        log.warning("Document attachment still not ready for chat=%s after %d attempts", chat_id, len(_DOCUMENT_READY_RETRY_DELAYS) + 1)
+        return {}
+
+    async def _request_upload_url(self, upload_type: str) -> dict:
+        session = getattr(self, "_session", None)
+        close_after = False
+        if session is None or session.closed:
+            session = aiohttp.ClientSession(headers=_BROWSER_HEADERS)
+            close_after = True
+
+        request_url = f"{_PLATFORM_API_BASE_URL}/uploads"
+        try:
+            async with session.post(
+                request_url,
+                params={"type": upload_type},
+                headers=self._platform_api_headers(),
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json(content_type=None)
+                body = await resp.text()
+                log.warning(
+                    "%s upload URL request failed - HTTP %d: %s",
+                    upload_type,
+                    resp.status,
+                    body[:500],
+                )
+        except Exception:
+            log.exception("%s upload URL request error", upload_type)
+        finally:
+            if close_after:
+                await session.close()
+        return {}
+
+    def _platform_api_headers(self) -> dict[str, str]:
         return {
-            "_type": "FILE",
-            "fileToken": token,
-            "name": filename,
+            **_BROWSER_HEADERS,
+            "Accept": "application/json",
+            "Authorization": self.token,
         }
 
     async def _upload_bytes(
@@ -456,7 +545,9 @@ class MaxClient:
         data: bytes,
         *,
         filename: str,
-        content_type: str,
+        content_type: str | None,
+        field_name: str = "file",
+        headers: dict[str, str] | None = None,
     ) -> dict:
         session = getattr(self, "_session", None)
         close_after = False
@@ -465,11 +556,14 @@ class MaxClient:
             close_after = True
 
         form = aiohttp.FormData()
-        form.add_field("file", data, filename=filename, content_type=content_type)
+        if content_type:
+            form.add_field(field_name, data, filename=filename, content_type=content_type)
+        else:
+            form.add_field(field_name, data, filename=filename)
         try:
             async with session.post(
                 url,
-                headers=_HTTP_HEADERS,
+                headers=headers or _HTTP_HEADERS,
                 data=form,
                 timeout=aiohttp.ClientTimeout(total=120),
             ) as resp:
@@ -592,6 +686,79 @@ class MaxClient:
         if isinstance(nested_file, dict):
             return MaxClient._extract_upload_token(nested_file, container_keys=container_keys)
         return None
+
+    @staticmethod
+    def _wrap_cmd_error(payload: Any) -> dict:
+        return {
+            _CMD_ERROR_MARKER: True,
+            "payload": payload if isinstance(payload, dict) else {"raw": payload},
+        }
+
+    @staticmethod
+    def _extract_cmd_error(payload: Any) -> dict | None:
+        if not isinstance(payload, dict) or payload.get(_CMD_ERROR_MARKER) is not True:
+            return None
+        error_payload = payload.get("payload")
+        if isinstance(error_payload, dict):
+            return error_payload
+        return {"raw": error_payload}
+
+    @staticmethod
+    def _is_attachment_not_ready_error(payload: dict) -> bool:
+        codes: list[str] = []
+        for key in ("code", "error_code"):
+            value = payload.get(key)
+            if value is not None:
+                codes.append(str(value).lower())
+
+        nested_error = payload.get("error")
+        if isinstance(nested_error, dict):
+            for key in ("code", "error_code"):
+                value = nested_error.get(key)
+                if value is not None:
+                    codes.append(str(value).lower())
+
+        return _ATTACHMENT_NOT_READY_CODE in codes
+
+    @staticmethod
+    def _normalize_document_attach(payload: dict, *, filename: str) -> dict:
+        if not isinstance(payload, dict):
+            return {}
+
+        if payload.get("_type") == "FILE" and isinstance(payload.get("fileToken"), str) and payload.get("fileToken"):
+            attach = dict(payload)
+            attach.setdefault("name", filename)
+            return attach
+
+        if isinstance(payload.get("fileToken"), str) and payload.get("fileToken"):
+            return {
+                "_type": "FILE",
+                "fileToken": payload["fileToken"],
+                "name": payload.get("name") or filename,
+            }
+
+        nested_payload = payload.get("payload")
+        if isinstance(nested_payload, dict):
+            attach = MaxClient._normalize_document_attach(nested_payload, filename=filename)
+            if attach:
+                return attach
+
+        token = MaxClient._extract_upload_token(payload, container_keys=("files", "file", "attachments"))
+        if not token:
+            return {}
+
+        attach_name = filename
+        for key in ("name", "filename", "title"):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                attach_name = value
+                break
+
+        return {
+            "_type": "FILE",
+            "fileToken": token,
+            "name": attach_name,
+        }
 
     @staticmethod
     def extract_sent_message_id(payload: Any) -> str | None:
