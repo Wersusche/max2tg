@@ -312,7 +312,7 @@ class TestResolveUser:
     @pytest.mark.asyncio
     async def test_returns_str_id_when_fetch_failed_before(self):
         resolver = ContactResolver()
-        resolver._fetch_failed.add(42)
+        resolver._mark_fetch_failed(42)
         result = await resolver.resolve_user(42)
         assert result == "42"
 
@@ -321,22 +321,42 @@ class TestResolveUser:
         from unittest.mock import AsyncMock, patch
 
         resolver = ContactResolver()
-        # _ws_fetch_contacts does nothing (no client), so user won't be found
-        with patch.object(resolver, "_ws_fetch_contacts", new=AsyncMock()):
+        with patch.object(resolver, "_ws_fetch_contacts", new=AsyncMock(return_value=True)):
             result = await resolver.resolve_user(99)
         assert result == "99"
-        assert 99 in resolver._fetch_failed
+        assert resolver._is_fetch_failed(99) is True
 
     @pytest.mark.asyncio
     async def test_populates_user_after_successful_fetch(self):
-        from unittest.mock import AsyncMock
-
         resolver = ContactResolver()
 
         async def fake_fetch(ids):
             resolver.users[ids[0]] = "Fetched User"
+            return True
 
         resolver._ws_fetch_contacts = fake_fetch
         result = await resolver.resolve_user(77)
         assert result == "Fetched User"
-        assert 77 not in resolver._fetch_failed
+        assert resolver._is_fetch_failed(77) is False
+
+    @pytest.mark.asyncio
+    async def test_retries_after_temporary_fetch_error(self):
+        resolver = ContactResolver()
+        attempts = 0
+
+        async def fake_fetch(ids):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return False
+            resolver.users[ids[0]] = "Fetched User"
+            return True
+
+        resolver._ws_fetch_contacts = fake_fetch
+
+        first_result = await resolver.resolve_user(77)
+        second_result = await resolver.resolve_user(77)
+
+        assert first_result == "77"
+        assert second_result == "Fetched User"
+        assert attempts == 2

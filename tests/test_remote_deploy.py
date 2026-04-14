@@ -91,6 +91,35 @@ def test_build_archive_includes_required_deploy_files():
     assert "requirements.txt" in names
 
 
+def test_build_archive_excludes_local_service_directories():
+    workspace_dir = _make_workspace_dir()
+    _populate_workspace_dir(workspace_dir)
+    (workspace_dir / ".codex_deps").mkdir()
+    (workspace_dir / ".codex_deps" / "pkg.txt").write_text("skip\n", encoding="utf-8")
+    (workspace_dir / ".tmp").mkdir()
+    (workspace_dir / ".tmp" / "scratch.txt").write_text("skip\n", encoding="utf-8")
+    (workspace_dir / "pytest-cache-files-abc").mkdir()
+    (workspace_dir / "pytest-cache-files-abc" / "cache.txt").write_text("skip\n", encoding="utf-8")
+    (workspace_dir / "tests").mkdir()
+    (workspace_dir / "tests" / "test_dummy.py").write_text("assert True\n", encoding="utf-8")
+    (workspace_dir / "README.md").write_text("docs\n", encoding="utf-8")
+
+    manager = _build_manager(workspace_dir)
+    try:
+        manager._build_archive()
+        with tarfile.open(manager._archive_path, mode="r:gz") as archive:
+            names = set(archive.getnames())
+    finally:
+        manager._cleanup_temp_files()
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+
+    assert ".codex_deps/pkg.txt" not in names
+    assert ".tmp/scratch.txt" not in names
+    assert "pytest-cache-files-abc/cache.txt" not in names
+    assert "tests/test_dummy.py" not in names
+    assert "README.md" not in names
+
+
 def test_dockerignore_keeps_remote_deploy_files_in_image():
     dockerignore_lines = {
         line.strip()
@@ -100,6 +129,19 @@ def test_dockerignore_keeps_remote_deploy_files_in_image():
 
     assert "docker-compose.yml" not in dockerignore_lines
     assert "Dockerfile" not in dockerignore_lines
+
+
+def test_dockerignore_excludes_local_service_directories():
+    dockerignore_lines = {
+        line.strip()
+        for line in Path(".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    assert ".codex_deps/" in dockerignore_lines
+    assert ".tmp/" in dockerignore_lines
+    assert "pytest-cache-files-*/" in dockerignore_lines
+    assert "requirements-dev.txt" in dockerignore_lines
 
 
 def test_bootstrap_remote_script_keeps_download_errors_visible():

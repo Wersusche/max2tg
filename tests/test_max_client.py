@@ -1,5 +1,7 @@
 """Tests for app/max_client.py — OpCode enum and _parse_message."""
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock
 from app.max_client import MaxClient, MaxMessage, OpCode, _HTTP_HEADERS
@@ -309,3 +311,55 @@ class TestSendHelpers:
             [{"type": "STRONG"}],
             attaches=[{"_type": "PHOTO", "photoToken": "abc"}],
         )
+
+
+class TestDispatchQueue:
+    @pytest.mark.asyncio
+    async def test_dispatch_preserves_order_within_same_chat(self):
+        client = MaxClient(token="tok", device_id="dev")
+        started = asyncio.Event()
+        release = asyncio.Event()
+        handled: list[tuple[str, str]] = []
+
+        @client.on_message
+        async def handle_message(msg):
+            handled.append(("start", msg.message_id))
+            if msg.message_id == "1":
+                started.set()
+                await release.wait()
+            handled.append(("done", msg.message_id))
+
+        first_dispatch = {
+            "opcode": OpCode.DISPATCH,
+            "payload": {
+                "chatId": 42,
+                "message": {"id": 1, "sender": 7, "text": "first"},
+            },
+        }
+        second_dispatch = {
+            "opcode": OpCode.DISPATCH,
+            "payload": {
+                "chatId": 42,
+                "message": {"id": 2, "sender": 7, "text": "second"},
+            },
+        }
+
+        first_task = asyncio.create_task(client._handle(first_dispatch))
+        await started.wait()
+        second_task = asyncio.create_task(client._handle(second_dispatch))
+        await asyncio.sleep(0)
+
+        assert handled == [("start", "1")]
+
+        release.set()
+        await first_task
+        await second_task
+        await client.wait_for_pending_dispatches()
+
+        assert handled == [
+            ("start", "1"),
+            ("done", "1"),
+            ("start", "2"),
+            ("done", "2"),
+        ]
+        await client._shutdown_message_dispatcher()

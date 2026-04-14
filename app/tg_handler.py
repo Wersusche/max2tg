@@ -11,90 +11,9 @@ from app.topic_store import TopicStore
 
 log = logging.getLogger(__name__)
 
-PENDING_REPLY_KEY = "pending_reply_chat_id"
-PENDING_REPLY_LABEL_KEY = "pending_reply_label"
-
 _ALLOWED_CHAT_ID_KEY = "allowed_chat_id"
 _TOPIC_STORE_KEY = "topic_store"
 _COMMAND_STORE_KEY = "command_store"
-
-
-async def _on_reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle inline 'Reply' button press."""
-    query = update.callback_query
-
-    allowed_chat_id = context.bot_data.get(_ALLOWED_CHAT_ID_KEY)
-    if allowed_chat_id is not None and (
-        update.effective_chat.id != allowed_chat_id and update.effective_user.id != allowed_chat_id
-    ):
-        await query.answer()
-        return
-
-    await query.answer()
-
-    data = query.data or ""
-    if not data.startswith("reply:"):
-        return
-
-    chat_id_str = data[len("reply:") :]
-    try:
-        max_chat_id = int(chat_id_str)
-    except ValueError:
-        max_chat_id = chat_id_str
-
-    context.user_data[PENDING_REPLY_KEY] = max_chat_id
-
-    source_text = query.message.text or query.message.caption or ""
-    label = source_text.split("\n")[0] if source_text else str(max_chat_id)
-    context.user_data[PENDING_REPLY_LABEL_KEY] = label
-
-    await query.message.reply_text(
-        f"✏️ Напишите ответ для <b>{label}</b> (ответом на оригинальное сообщение):\n"
-        "<i>(или /cancel для отмены)</i>",
-        parse_mode="HTML",
-    )
-
-
-async def _on_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Cancel pending reply."""
-    if context.user_data.pop(PENDING_REPLY_KEY, None):
-        context.user_data.pop(PENDING_REPLY_LABEL_KEY, None)
-        await update.message.reply_text("❌ Ответ отменён.")
-    else:
-        await update.message.reply_text("Нет активного ответа для отмены.")
-
-
-async def _on_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Forward user's text as a reply to Max."""
-    max_chat_id = context.user_data.pop(PENDING_REPLY_KEY, None)
-    label = context.user_data.pop(PENDING_REPLY_LABEL_KEY, None)
-    if max_chat_id is None:
-        return
-
-    max_client: MaxClient | None = context.bot_data.get("max_client")
-    command_store: CommandStore | None = context.bot_data.get(_COMMAND_STORE_KEY)
-    if not max_client and not command_store:
-        await update.message.reply_text("⚠️ Max клиент не подключён.")
-        return
-
-    text = update.message.text
-    text, elements = _decorate_outbound_text(update.message, text)
-    try:
-        if max_client:
-            resp = await max_client.send_message(max_chat_id, text, elements)
-        else:
-            command_store.enqueue(max_chat_id, text, elements)
-            resp = {"queued": True}
-        if resp:
-            await update.message.reply_text(
-                f"✅ Отправлено → <b>{label or max_chat_id}</b>",
-                parse_mode="HTML",
-            )
-        else:
-            await update.message.reply_text("⚠️ Не удалось отправить сообщение в Max.")
-    except Exception:
-        log.exception("Failed to send reply to Max chat %s", max_chat_id)
-        await update.message.reply_text("⚠️ Ошибка при отправке в Max.")
 
 
 def _parse_max_chat_id(value: str):
@@ -111,7 +30,12 @@ def _message_text_or_caption(update: Update) -> str | None:
     return message.text or message.caption
 
 
-def _decorate_outbound_text(message, text: str | None, *, include_sender_when_empty: bool = False) -> tuple[str, list[dict]]:
+def _decorate_outbound_text(
+    message,
+    text: str | None,
+    *,
+    include_sender_when_empty: bool = False,
+) -> tuple[str, list[dict]]:
     text = text or ""
     elements: list[dict] = []
     if message.chat.type in [telegram.constants.ChatType.GROUP, telegram.constants.ChatType.SUPERGROUP]:
@@ -157,7 +81,6 @@ async def _download_largest_photo(message) -> tuple[bytes, str] | None:
 
 
 async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Forward Telegram forum topic messages to the mapped Max chat."""
     message = update.message
     if not message:
         return
@@ -167,9 +90,7 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     allowed_chat_id = context.bot_data.get(_ALLOWED_CHAT_ID_KEY)
-    if allowed_chat_id is None:
-        return
-    if update.effective_chat.id != allowed_chat_id:
+    if allowed_chat_id is None or update.effective_chat.id != allowed_chat_id:
         return
 
     message_thread_id = getattr(message, "message_thread_id", None)
@@ -258,7 +179,6 @@ def build_tg_app(
     command_store: CommandStore | None = None,
     max_client: MaxClient | None = None,
 ) -> Application:
-    """Build and configure the Telegram Application with handlers."""
     app = Application.builder().token(token).build()
     if max_client is not None:
         app.bot_data["max_client"] = max_client

@@ -2,7 +2,7 @@ import asyncio
 import io
 import logging
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram import Bot, InputFile
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter, TimedOut
 
@@ -11,13 +11,6 @@ log = logging.getLogger(__name__)
 TG_MAX_LENGTH = 4096
 TG_CAPTION_MAX = 1024
 MAX_RETRIES = 3
-
-
-def reply_keyboard(max_chat_id) -> InlineKeyboardMarkup:
-    """Build an inline keyboard with a single 'Reply' button."""
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("💬 Ответить", callback_data=f"reply:{max_chat_id}")
-    ]])
 
 
 class TelegramSender:

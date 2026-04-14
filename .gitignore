@@ -3,8 +3,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .tmp/
+.codex_deps/
 pytest-fixtures/
 pytest-temp-files/
+pytest-cache-files/
 pytest-cache-files-*/
 .venv/
 data/
