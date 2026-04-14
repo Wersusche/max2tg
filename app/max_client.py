@@ -144,6 +144,9 @@ class MaxClient:
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[dict] = loop.create_future()
         seq = await self._send(opcode, payload)
+        if seq < 0:
+            log.warning("cmd skipped: op=%d websocket is not connected", opcode)
+            return {}
         self._pending[seq] = fut
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
@@ -306,7 +309,7 @@ class MaxClient:
         if attaches:
             message["attaches"] = attaches
         if reply_to_max_message_id is not None:
-            message["link"] = {"type": "REPLY", "mid": str(reply_to_max_message_id)}
+            message["link"] = {"type": "REPLY", "messageId": str(reply_to_max_message_id)}
         resp = await self.cmd(
             OpCode.SEND_MESSAGE,
             {

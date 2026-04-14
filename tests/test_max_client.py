@@ -304,7 +304,16 @@ class TestSendHelpers:
         await client.send_message(42, "hello", reply_to_max_message_id="max-1")
 
         payload = client.cmd.await_args.args[1]
-        assert payload["message"]["link"] == {"type": "REPLY", "mid": "max-1"}
+        assert payload["message"]["link"] == {"type": "REPLY", "messageId": "max-1"}
+
+    @pytest.mark.asyncio
+    async def test_cmd_returns_empty_payload_without_waiting_when_websocket_unavailable(self):
+        client = MaxClient(token="tok", device_id="dev")
+
+        payload = await asyncio.wait_for(client.cmd(OpCode.SEND_MESSAGE, {"chatId": 42}), timeout=0.1)
+
+        assert payload == {}
+        assert client._pending == {}
 
     @pytest.mark.asyncio
     async def test_send_photo_uploads_and_sends_attach(self):
@@ -348,6 +357,9 @@ class TestSendHelpers:
 
     def test_extract_sent_message_id_prefers_nested_message_payload(self):
         assert MaxClient.extract_sent_message_id({"message": {"id": "max-7"}, "id": "outer"}) == "max-7"
+
+    def test_extract_sent_message_id_accepts_message_id_fallback(self):
+        assert MaxClient.extract_sent_message_id({"messageId": "max-9"}) == "max-9"
 
     def test_extract_sent_message_id_accepts_mid_fallback(self):
         assert MaxClient.extract_sent_message_id({"mid": "max-8"}) == "max-8"
