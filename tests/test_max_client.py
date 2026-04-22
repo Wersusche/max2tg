@@ -23,7 +23,7 @@ class _FakeResponse:
     async def json(self, content_type=None):
         return self._payload
 
-    async def text(self):
+    async def text(self, errors=None):
         return self._text
 
     async def read(self):
@@ -31,18 +31,26 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    def __init__(self, response: _FakeResponse):
-        self.response = response
+    def __init__(self, response: _FakeResponse | list[_FakeResponse]):
+        if isinstance(response, list):
+            self.responses = list(response)
+        else:
+            self.responses = [response]
         self.closed = False
         self.calls: list[tuple[str, dict]] = []
 
+    def _next_response(self) -> _FakeResponse:
+        if len(self.responses) == 1:
+            return self.responses[0]
+        return self.responses.pop(0)
+
     def post(self, url, **kwargs):
         self.calls.append((url, kwargs))
-        return self.response
+        return self._next_response()
 
     def get(self, url, **kwargs):
         self.calls.append((url, kwargs))
-        return self.response
+        return self._next_response()
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +494,29 @@ class TestSendHelpers:
         _, kwargs = session.calls[0]
         assert kwargs["headers"]["Authorization"] == "tok"
         assert kwargs["headers"]["Origin"] == _HTTP_HEADERS["Origin"]
+
+    @pytest.mark.asyncio
+    async def test_download_file_result_retries_signed_max_media_without_authorization(self):
+        client = MaxClient(token="tok", device_id="dev")
+        session = _FakeSession(
+            [
+                _FakeResponse(status=400, text="bad signed request"),
+                _FakeResponse(status=200, body=b"voice-bytes"),
+            ]
+        )
+        client._session = session
+
+        result = await client.download_file_result("https://maxvd526.okcdn.ru/voice.ogg?expires=1&sig=abc")
+
+        assert result.data == b"voice-bytes"
+        assert result.status == 200
+        assert result.used_authorization is False
+        assert len(session.calls) == 2
+        _, first_kwargs = session.calls[0]
+        _, second_kwargs = session.calls[1]
+        assert first_kwargs["headers"]["Authorization"] == "tok"
+        assert "Authorization" not in second_kwargs["headers"]
+        assert second_kwargs["headers"]["Origin"] == _HTTP_HEADERS["Origin"]
 
     @pytest.mark.asyncio
     async def test_download_file_skips_authorization_for_external_urls(self):
