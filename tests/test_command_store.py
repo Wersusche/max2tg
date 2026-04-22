@@ -30,6 +30,7 @@ def test_enqueue_lease_and_ack(tmp_path):
     assert leased.tg_chat_id == -100
     assert leased.tg_message_id == 7001
     assert leased.message_thread_id == 55
+    assert leased.attempt_count == 1
 
     store.ack(leased.id)
     assert store.count() == 0
@@ -68,6 +69,7 @@ def test_enqueue_photo_lease_and_ack(tmp_path):
     assert leased.tg_chat_id == -100
     assert leased.tg_message_id == 7002
     assert leased.message_thread_id == 56
+    assert leased.attempt_count == 1
 
     store.ack(leased.id)
     assert store.count() == 0
@@ -100,7 +102,41 @@ def test_enqueue_document_lease_and_ack(tmp_path):
     assert leased.tg_chat_id == -100
     assert leased.tg_message_id == 7003
     assert leased.message_thread_id == 57
+    assert leased.attempt_count == 1
 
     store.ack(leased.id)
     assert store.count() == 0
+    store.close()
+
+
+def test_mark_failed_requeues_then_dead_letters_after_max_attempts(tmp_path):
+    store = _make_store(tmp_path)
+    queued = store.enqueue(42, "hello")
+
+    first_lease = store.lease_next()
+    assert first_lease is not None
+    assert first_lease.attempt_count == 1
+
+    first_failure = store.mark_failed(first_lease.id, error="temporary", max_attempts=2)
+    assert first_failure is not None
+    assert first_failure.attempt_count == 1
+    assert first_failure.dead_lettered is False
+
+    second_lease = store.lease_next()
+    assert second_lease is not None
+    assert second_lease.id == queued.id
+    assert second_lease.attempt_count == 2
+
+    second_failure = store.mark_failed(second_lease.id, error="permanent", max_attempts=2)
+    assert second_failure is not None
+    assert second_failure.attempt_count == 2
+    assert second_failure.dead_lettered is True
+    assert store.lease_next() is None
+
+    row = store._conn.execute(
+        "SELECT failed_at, last_error FROM max_commands WHERE id = ?",
+        (queued.id,),
+    ).fetchone()
+    assert row["failed_at"] is not None
+    assert row["last_error"] == "permanent"
     store.close()

@@ -105,6 +105,17 @@ class RelayClient:
         ) as resp:
             await _raise_for_status(resp)
 
+    async def fail_command(self, command_id: int, *, error: str | None = None) -> dict[str, Any]:
+        session = await self._get_session()
+        async with session.post(
+            f"{self.base_url}/internal/max-commands/{int(command_id)}/fail",
+            json={"error": error} if error is not None else {},
+            headers={SECRET_HEADER: self.shared_secret},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            await _raise_for_status(resp)
+            return await resp.json()
+
     async def lookup_message_mapping(self, *, max_chat_id: Any, max_message_id: Any) -> int | None:
         session = await self._get_session()
         async with session.get(
