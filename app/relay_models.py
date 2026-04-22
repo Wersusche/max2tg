@@ -81,6 +81,7 @@ class MaxCommand:
     tg_chat_id: int | None = None
     tg_message_id: int | None = None
     message_thread_id: int | None = None
+    attempt_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -89,6 +90,7 @@ class MaxCommand:
             "kind": self.kind,
             "text": self.text,
             "elements": self.elements,
+            "attempt_count": self.attempt_count,
         }
         if self.filename is not None:
             data["filename"] = self.filename
@@ -119,6 +121,7 @@ class MaxCommand:
             tg_chat_id=int(payload["tg_chat_id"]) if payload.get("tg_chat_id") is not None else None,
             tg_message_id=int(payload["tg_message_id"]) if payload.get("tg_message_id") is not None else None,
             message_thread_id=int(payload["message_thread_id"]) if payload.get("message_thread_id") is not None else None,
+            attempt_count=int(payload.get("attempt_count") or 0),
         )
 
 

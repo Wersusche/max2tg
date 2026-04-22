@@ -117,6 +117,7 @@ async def test_relay_pulls_and_acks_command(tmp_path):
         assert payload["tg_chat_id"] == -100
         assert payload["tg_message_id"] == 7001
         assert payload["message_thread_id"] == 55
+        assert payload["attempt_count"] == 1
 
         ack = await client.post(
             f"/internal/max-commands/{queued.id}/ack",
@@ -144,6 +145,38 @@ async def test_relay_pulls_photo_command_with_attachment(tmp_path):
         assert payload["kind"] == "photo"
         assert payload["filename"] == "pic.jpg"
         assert payload["attachment_b64"]
+        assert payload["attempt_count"] == 1
+    finally:
+        await client.close()
+        topic_store.close()
+        command_store.close()
+        message_store.close()
+
+
+@pytest.mark.asyncio
+async def test_relay_fail_command_requeues_before_dead_letter(tmp_path):
+    client, _sender, topic_store, command_store, message_store = await _make_client(tmp_path)
+    try:
+        queued = command_store.enqueue(42, "Hello")
+
+        pull = await client.get("/internal/max-commands/pull", headers={"X-Relay-Secret": "secret"})
+        assert pull.status == 200
+
+        fail = await client.post(
+            f"/internal/max-commands/{queued.id}/fail",
+            json={"error": "temporary"},
+            headers={"X-Relay-Secret": "secret"},
+        )
+        assert fail.status == 200
+        payload = await fail.json()
+        assert payload["attempt_count"] == 1
+        assert payload["dead_lettered"] is False
+
+        retry = await client.get("/internal/max-commands/pull", headers={"X-Relay-Secret": "secret"})
+        assert retry.status == 200
+        retry_payload = await retry.json()
+        assert retry_payload["id"] == queued.id
+        assert retry_payload["attempt_count"] == 2
     finally:
         await client.close()
         topic_store.close()

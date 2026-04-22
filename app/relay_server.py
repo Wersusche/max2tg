@@ -222,6 +222,7 @@ def create_relay_app(
     app.router.add_post("/internal/telegram-batch", _telegram_batch)
     app.router.add_get("/internal/max-commands/pull", _pull_max_command)
     app.router.add_post("/internal/max-commands/{command_id}/ack", _ack_max_command)
+    app.router.add_post("/internal/max-commands/{command_id}/fail", _fail_max_command)
     app.router.add_post("/internal/message-mappings/upsert", _upsert_message_mapping)
     app.router.add_get("/internal/message-mappings/lookup", _lookup_message_mapping)
     return app
@@ -261,6 +262,31 @@ async def _ack_max_command(request: web.Request) -> web.Response:
     command_store = request.app[COMMAND_STORE_KEY]
     command_store.ack(int(request.match_info["command_id"]))
     return web.json_response({"ok": True})
+
+
+async def _fail_max_command(request: web.Request) -> web.Response:
+    _authorize(request)
+    command_store = request.app[COMMAND_STORE_KEY]
+    payload = {}
+    if request.can_read_body:
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError as exc:
+            raise web.HTTPBadRequest(text="invalid JSON payload") from exc
+
+    result = command_store.mark_failed(
+        int(request.match_info["command_id"]),
+        error=payload.get("error"),
+    )
+    if result is None:
+        raise web.HTTPNotFound(text="command not found")
+    return web.json_response(
+        {
+            "ok": True,
+            "attempt_count": result.attempt_count,
+            "dead_lettered": result.dead_lettered,
+        }
+    )
 
 
 async def _upsert_message_mapping(request: web.Request) -> web.Response:

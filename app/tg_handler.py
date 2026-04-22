@@ -333,7 +333,7 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     response=resp,
                 )
             else:
-                command_store.enqueue_photo(
+                queued = command_store.enqueue_photo(
                     parsed_max_chat_id,
                     photo_bytes,
                     caption=caption,
@@ -343,6 +343,14 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     tg_chat_id=int(allowed_chat_id),
                     tg_message_id=outbound_tg_message_id,
                     message_thread_id=int(message_thread_id),
+                )
+                log.info(
+                    "Queued Telegram->Max command id=%s kind=%s tg_message_id=%s max_chat_id=%s thread=%s",
+                    queued.id,
+                    queued.kind,
+                    queued.tg_message_id,
+                    queued.max_chat_id,
+                    queued.message_thread_id,
                 )
                 resp = {"queued": True}
             if not resp:
@@ -383,7 +391,7 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     response=resp,
                 )
             else:
-                command_store.enqueue_document(
+                queued = command_store.enqueue_document(
                     parsed_max_chat_id,
                     document_bytes,
                     caption=caption,
@@ -393,6 +401,14 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     tg_chat_id=int(allowed_chat_id),
                     tg_message_id=outbound_tg_message_id,
                     message_thread_id=int(message_thread_id),
+                )
+                log.info(
+                    "Queued Telegram->Max command id=%s kind=%s tg_message_id=%s max_chat_id=%s thread=%s",
+                    queued.id,
+                    queued.kind,
+                    queued.tg_message_id,
+                    queued.max_chat_id,
+                    queued.message_thread_id,
                 )
                 resp = {"queued": True}
             if not resp:
@@ -422,7 +438,7 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 response=resp,
             )
         else:
-            command_store.enqueue(
+            queued = command_store.enqueue(
                 parsed_max_chat_id,
                 text,
                 elements,
@@ -430,6 +446,14 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 tg_chat_id=int(allowed_chat_id),
                 tg_message_id=outbound_tg_message_id,
                 message_thread_id=int(message_thread_id),
+            )
+            log.info(
+                "Queued Telegram->Max command id=%s kind=%s tg_message_id=%s max_chat_id=%s thread=%s",
+                queued.id,
+                queued.kind,
+                queued.tg_message_id,
+                queued.max_chat_id,
+                queued.message_thread_id,
             )
             resp = {"queued": True}
         if not resp:

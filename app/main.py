@@ -26,6 +26,7 @@ threading.stack_size(524288)
 
 log = logging.getLogger("max2tg")
 APP_ROOT_DIR = Path(__file__).resolve().parent.parent
+RELAY_COMMAND_PROCESS_TIMEOUT_SECONDS = 180
 
 
 class _SyncExecutor(ThreadPoolExecutor):
@@ -71,38 +72,136 @@ def _parse_max_chat_id(value: str):
         return value
 
 
+def _command_failure_reason(error: BaseException | str) -> str:
+    if isinstance(error, BaseException):
+        return f"{error.__class__.__name__}: {error}"
+    return str(error)
+
+
+def _failure_log_suffix(result: dict | None) -> str:
+    if not result:
+        return ""
+
+    attempt_count = result.get("attempt_count")
+    dead_lettered = result.get("dead_lettered")
+    if attempt_count is None:
+        return ""
+    if dead_lettered:
+        return f" after attempt {attempt_count} (dead-lettered)"
+    return f" after attempt {attempt_count}"
+
+
+async def _send_relay_command_to_max(max_client, command, max_chat_id):
+    if command.kind == "photo":
+        return await max_client.send_photo(
+            max_chat_id,
+            command.attachment or b"",
+            caption=command.text,
+            elements=command.elements,
+            filename=command.filename or "photo.jpg",
+            reply_to_max_message_id=command.reply_to_max_message_id,
+        )
+    if command.kind == "document":
+        return await max_client.send_document(
+            max_chat_id,
+            command.attachment or b"",
+            caption=command.text,
+            elements=command.elements,
+            filename=command.filename or "file",
+            reply_to_max_message_id=command.reply_to_max_message_id,
+        )
+    return await max_client.send_message(
+        max_chat_id,
+        command.text,
+        command.elements,
+        reply_to_max_message_id=command.reply_to_max_message_id,
+    )
+
+
+async def _mark_relay_command_failed(
+    relay_client: RelayClient,
+    command,
+    *,
+    reason: str,
+) -> dict | None:
+    try:
+        return await relay_client.fail_command(command.id, error=reason)
+    except Exception:
+        log.exception(
+            "Failed to mark queued Telegram->Max command id=%s kind=%s chat=%s as failed",
+            command.id,
+            command.kind,
+            command.max_chat_id,
+        )
+        return None
+
+
 async def _relay_command_loop(relay_client: RelayClient, max_client) -> None:
     while True:
         try:
             command = await relay_client.pull_command(timeout_seconds=30)
             if command is None:
                 continue
+            log.info(
+                "Pulled queued Telegram->Max command id=%s kind=%s chat=%s attempt=%s",
+                command.id,
+                command.kind,
+                command.max_chat_id,
+                command.attempt_count,
+            )
             max_chat_id = _parse_max_chat_id(command.max_chat_id)
-            if command.kind == "photo":
-                response = await max_client.send_photo(
-                    max_chat_id,
-                    command.attachment or b"",
-                    caption=command.text,
-                    elements=command.elements,
-                    filename=command.filename or "photo.jpg",
-                    reply_to_max_message_id=command.reply_to_max_message_id,
+            try:
+                log.info(
+                    "Sending queued Telegram->Max command id=%s kind=%s chat=%s to Max",
+                    command.id,
+                    command.kind,
+                    command.max_chat_id,
                 )
-            elif command.kind == "document":
-                response = await max_client.send_document(
-                    max_chat_id,
-                    command.attachment or b"",
-                    caption=command.text,
-                    elements=command.elements,
-                    filename=command.filename or "file",
-                    reply_to_max_message_id=command.reply_to_max_message_id,
+                response = await asyncio.wait_for(
+                    _send_relay_command_to_max(max_client, command, max_chat_id),
+                    timeout=RELAY_COMMAND_PROCESS_TIMEOUT_SECONDS,
                 )
-            else:
-                response = await max_client.send_message(
-                    max_chat_id,
-                    command.text,
-                    command.elements,
-                    reply_to_max_message_id=command.reply_to_max_message_id,
+                log.info(
+                    "Finished queued Telegram->Max command id=%s kind=%s chat=%s ok=%s",
+                    command.id,
+                    command.kind,
+                    command.max_chat_id,
+                    bool(response),
                 )
+            except asyncio.TimeoutError:
+                reason = (
+                    f"Timed out while processing queued Telegram->Max command after "
+                    f"{RELAY_COMMAND_PROCESS_TIMEOUT_SECONDS}s"
+                )
+                result = await _mark_relay_command_failed(
+                    relay_client,
+                    command,
+                    reason=reason,
+                )
+                log.warning(
+                    "Timed out queued Telegram->Max command id=%s kind=%s chat=%s%s",
+                    command.id,
+                    command.kind,
+                    command.max_chat_id,
+                    _failure_log_suffix(result),
+                )
+                await asyncio.sleep(2)
+                continue
+            except Exception as exc:
+                result = await _mark_relay_command_failed(
+                    relay_client,
+                    command,
+                    reason=_command_failure_reason(exc),
+                )
+                log.exception(
+                    "Failed while sending queued Telegram->Max command id=%s kind=%s chat=%s%s",
+                    command.id,
+                    command.kind,
+                    command.max_chat_id,
+                    _failure_log_suffix(result),
+                )
+                await asyncio.sleep(5)
+                continue
             if response:
                 if command.tg_chat_id is not None and command.tg_message_id is not None:
                     max_message_id = max_client.extract_sent_message_id(response)
@@ -124,8 +223,25 @@ async def _relay_command_loop(relay_client: RelayClient, max_client) -> None:
                                 max_message_id,
                             )
                 await relay_client.ack_command(command.id)
+                log.info(
+                    "Acked queued Telegram->Max command id=%s kind=%s chat=%s",
+                    command.id,
+                    command.kind,
+                    command.max_chat_id,
+                )
             else:
-                log.warning("Max rejected queued command id=%s chat=%s", command.id, command.max_chat_id)
+                result = await _mark_relay_command_failed(
+                    relay_client,
+                    command,
+                    reason="Max rejected queued Telegram->Max command",
+                )
+                log.warning(
+                    "Max rejected queued Telegram->Max command id=%s kind=%s chat=%s%s",
+                    command.id,
+                    command.kind,
+                    command.max_chat_id,
+                    _failure_log_suffix(result),
+                )
                 await asyncio.sleep(2)
         except asyncio.CancelledError:
             raise

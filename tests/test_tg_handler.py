@@ -405,7 +405,7 @@ class TestOnTopicMessage:
 
 class TestRelayQueueMode:
     @pytest.mark.asyncio
-    async def test_topic_message_enqueues_command_when_command_store_present(self, tmp_path):
+    async def test_topic_message_enqueues_command_when_command_store_present(self, tmp_path, caplog):
         topic_store = TopicStore(str(tmp_path / "topics.sqlite3"))
         command_store = CommandStore(str(tmp_path / "commands.sqlite3"))
         message_store = MessageStore(str(tmp_path / "messages.sqlite3"))
@@ -434,6 +434,7 @@ class TestRelayQueueMode:
             reply_to_message=_make_replied_message(message_id=7001, text="Original"),
         )
 
+        caplog.set_level("INFO")
         await _on_topic_message(update, ctx)
 
         queued = command_store.lease_next()
@@ -445,6 +446,7 @@ class TestRelayQueueMode:
         assert queued.tg_chat_id == -100
         assert queued.tg_message_id == 9001
         assert queued.message_thread_id == 10
+        assert "Queued Telegram->Max command id=" in caplog.text
         topic_store.close()
         command_store.close()
         message_store.close()

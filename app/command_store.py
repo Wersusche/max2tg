@@ -10,12 +10,21 @@ from typing import Any
 
 from app.relay_models import MaxCommand
 
+DEFAULT_MAX_FAILURE_ATTEMPTS = 3
+
 
 @dataclass(frozen=True)
 class LeaseOptions:
     timeout_seconds: int = 30
     poll_interval_seconds: float = 0.5
     lease_timeout_seconds: int = 60
+
+
+@dataclass(frozen=True)
+class CommandFailureResult:
+    command_id: int
+    attempt_count: int
+    dead_lettered: bool
 
 
 class CommandStore:
@@ -52,6 +61,9 @@ class CommandStore:
                     tg_chat_id INTEGER NULL,
                     tg_message_id INTEGER NULL,
                     message_thread_id INTEGER NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    failed_at TEXT NULL,
+                    last_error TEXT NULL,
                     leased_at TEXT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
@@ -89,6 +101,18 @@ class CommandStore:
                 self._conn.execute(
                     "ALTER TABLE max_commands ADD COLUMN message_thread_id INTEGER NULL"
                 )
+            if "attempt_count" not in existing_columns:
+                self._conn.execute(
+                    "ALTER TABLE max_commands ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0"
+                )
+            if "failed_at" not in existing_columns:
+                self._conn.execute(
+                    "ALTER TABLE max_commands ADD COLUMN failed_at TEXT NULL"
+                )
+            if "last_error" not in existing_columns:
+                self._conn.execute(
+                    "ALTER TABLE max_commands ADD COLUMN last_error TEXT NULL"
+                )
             self._conn.commit()
 
     def enqueue(
@@ -117,9 +141,12 @@ class CommandStore:
                     tg_chat_id,
                     tg_message_id,
                     message_thread_id,
+                    attempt_count,
+                    failed_at,
+                    last_error,
                     leased_at
                 )
-                VALUES (?, 'text', ?, ?, NULL, NULL, ?, ?, ?, ?, NULL)
+                VALUES (?, 'text', ?, ?, NULL, NULL, ?, ?, ?, ?, 0, NULL, NULL, NULL)
                 """,
                 (
                     str(max_chat_id),
@@ -174,9 +201,12 @@ class CommandStore:
                     tg_chat_id,
                     tg_message_id,
                     message_thread_id,
+                    attempt_count,
+                    failed_at,
+                    last_error,
                     leased_at
                 )
-                VALUES (?, 'photo', ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, 'photo', ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL)
                 """,
                 (
                     str(max_chat_id),
@@ -262,9 +292,12 @@ class CommandStore:
                     tg_chat_id,
                     tg_message_id,
                     message_thread_id,
+                    attempt_count,
+                    failed_at,
+                    last_error,
                     leased_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL)
                 """,
                 (
                     str(max_chat_id),
@@ -311,9 +344,11 @@ class CommandStore:
                     reply_to_max_message_id,
                     tg_chat_id,
                     tg_message_id,
-                    message_thread_id
+                    message_thread_id,
+                    attempt_count
                 FROM max_commands
                 WHERE leased_at IS NULL
+                  AND failed_at IS NULL
                 ORDER BY id ASC
                 LIMIT 1
                 """
@@ -322,16 +357,90 @@ class CommandStore:
                 self._conn.commit()
                 return None
             self._conn.execute(
-                "UPDATE max_commands SET leased_at = CURRENT_TIMESTAMP WHERE id = ?",
+                """
+                UPDATE max_commands
+                SET leased_at = CURRENT_TIMESTAMP,
+                    attempt_count = COALESCE(attempt_count, 0) + 1
+                WHERE id = ?
+                """,
                 (int(row["id"]),),
             )
             self._conn.commit()
-        return self._row_to_command(row)
+            leased_row = self._conn.execute(
+                """
+                SELECT
+                    id,
+                    max_chat_id,
+                    kind,
+                    text,
+                    elements_json,
+                    filename,
+                    attachment_blob,
+                    reply_to_max_message_id,
+                    tg_chat_id,
+                    tg_message_id,
+                    message_thread_id,
+                    attempt_count
+                FROM max_commands
+                WHERE id = ?
+                """,
+                (int(row["id"]),),
+            ).fetchone()
+        return self._row_to_command(leased_row)
 
     def ack(self, command_id: int) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM max_commands WHERE id = ?", (int(command_id),))
             self._conn.commit()
+
+    def mark_failed(
+        self,
+        command_id: int,
+        *,
+        error: str | None = None,
+        max_attempts: int = DEFAULT_MAX_FAILURE_ATTEMPTS,
+    ) -> CommandFailureResult | None:
+        normalized_error = None if error is None else str(error)[:500]
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, attempt_count FROM max_commands WHERE id = ?",
+                (int(command_id),),
+            ).fetchone()
+            if row is None:
+                self._conn.commit()
+                return None
+
+            attempt_count = int(row["attempt_count"] or 0)
+            dead_lettered = attempt_count >= max(1, int(max_attempts))
+            if dead_lettered:
+                self._conn.execute(
+                    """
+                    UPDATE max_commands
+                    SET leased_at = NULL,
+                        failed_at = COALESCE(failed_at, CURRENT_TIMESTAMP),
+                        last_error = ?
+                    WHERE id = ?
+                    """,
+                    (normalized_error, int(command_id)),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE max_commands
+                    SET leased_at = NULL,
+                        last_error = ?
+                    WHERE id = ?
+                    """,
+                    (normalized_error, int(command_id)),
+                )
+            self._conn.commit()
+
+        self._notify_waiters()
+        return CommandFailureResult(
+            command_id=int(command_id),
+            attempt_count=attempt_count,
+            dead_lettered=dead_lettered,
+        )
 
     def count(self) -> int:
         with self._lock:
@@ -394,6 +503,7 @@ class CommandStore:
             tg_chat_id=int(row["tg_chat_id"]) if row["tg_chat_id"] is not None else None,
             tg_message_id=int(row["tg_message_id"]) if row["tg_message_id"] is not None else None,
             message_thread_id=int(row["message_thread_id"]) if row["message_thread_id"] is not None else None,
+            attempt_count=int(row["attempt_count"]) if row["attempt_count"] is not None else 0,
         )
 
     def _get_or_create_event(self) -> asyncio.Event:
