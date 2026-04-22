@@ -8,10 +8,11 @@ from app.max_client import MaxClient, MaxMessage, OpCode, _HTTP_HEADERS
 
 
 class _FakeResponse:
-    def __init__(self, *, status: int, payload: dict | None = None, text: str = ""):
+    def __init__(self, *, status: int, payload: dict | None = None, text: str = "", body: bytes = b""):
         self.status = status
         self._payload = payload or {}
         self._text = text
+        self._body = body
 
     async def __aenter__(self):
         return self
@@ -25,6 +26,9 @@ class _FakeResponse:
     async def text(self):
         return self._text
 
+    async def read(self):
+        return self._body
+
 
 class _FakeSession:
     def __init__(self, response: _FakeResponse):
@@ -33,6 +37,10 @@ class _FakeSession:
         self.calls: list[tuple[str, dict]] = []
 
     def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.response
+
+    def get(self, url, **kwargs):
         self.calls.append((url, kwargs))
         return self.response
 
@@ -451,6 +459,45 @@ class TestSendHelpers:
         assert kwargs["params"] == {"type": "file"}
         assert kwargs["headers"]["Authorization"] == "tok"
         assert kwargs["headers"]["Accept"] == "application/json"
+
+    @pytest.mark.asyncio
+    async def test_fetch_message_uses_platform_api_authorization(self):
+        client = MaxClient(token="tok", device_id="dev")
+        session = _FakeSession(_FakeResponse(status=200, payload={"message": {"id": "max-1"}}))
+        client._session = session
+
+        payload = await client.fetch_message("max-1")
+
+        assert payload == {"message": {"id": "max-1"}}
+        url, kwargs = session.calls[0]
+        assert url.endswith("/messages/max-1")
+        assert kwargs["headers"]["Authorization"] == "tok"
+        assert kwargs["headers"]["Accept"] == "application/json"
+
+    @pytest.mark.asyncio
+    async def test_download_file_uses_authorization_for_max_media_urls(self):
+        client = MaxClient(token="tok", device_id="dev")
+        session = _FakeSession(_FakeResponse(status=200, body=b"voice-bytes"))
+        client._session = session
+
+        payload = await client.download_file("https://maxvd526.okcdn.ru/voice.ogg")
+
+        assert payload == b"voice-bytes"
+        _, kwargs = session.calls[0]
+        assert kwargs["headers"]["Authorization"] == "tok"
+        assert kwargs["headers"]["Origin"] == _HTTP_HEADERS["Origin"]
+
+    @pytest.mark.asyncio
+    async def test_download_file_skips_authorization_for_external_urls(self):
+        client = MaxClient(token="tok", device_id="dev")
+        session = _FakeSession(_FakeResponse(status=200, body=b"file-bytes"))
+        client._session = session
+
+        payload = await client.download_file("https://example.com/file.bin")
+
+        assert payload == b"file-bytes"
+        _, kwargs = session.calls[0]
+        assert "Authorization" not in kwargs["headers"]
 
     @pytest.mark.asyncio
     async def test_upload_document_uses_file_upload_endpoint_and_data_field(self):

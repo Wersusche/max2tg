@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.max_client import MaxMessage
+from app.max_client import DownloadResult, MaxMessage
 from app.max_forwarder import forward_max_message
 from app.message_store import MessageStore
 from app.resolver import ContactResolver
@@ -27,6 +27,18 @@ def _make_resolver():
         resolve_user=AsyncMock(return_value="Alice"),
         is_dm=lambda chat_id: True,
         chat_name=lambda chat_id: "Alice",
+    )
+
+
+def _make_media_sender(*, send_message_id: int = 7001, voice_message_id: int = 7101):
+    return SimpleNamespace(
+        chat_id="-100",
+        send=AsyncMock(return_value=SimpleNamespace(message_id=send_message_id)),
+        send_photo=AsyncMock(),
+        send_document=AsyncMock(),
+        send_video=AsyncMock(),
+        send_voice=AsyncMock(return_value=SimpleNamespace(message_id=voice_message_id)),
+        send_sticker=AsyncMock(),
     )
 
 
@@ -59,6 +71,196 @@ async def test_forward_max_message_skips_duplicate_max_message_id(tmp_path):
         stored = store.get_by_max_message(max_chat_id=42, max_message_id="max-1")
         assert stored is not None
         assert stored.tg_message_id == 7001
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_forward_max_audio_retries_via_refreshed_message_payload(tmp_path):
+    sender = _make_media_sender()
+    resolver = _make_resolver()
+    client = SimpleNamespace(
+        download_file_result=AsyncMock(
+            side_effect=[
+                DownloadResult(status=400, used_authorization=True),
+                DownloadResult(data=b"voice-bytes", status=200, used_authorization=True),
+            ]
+        ),
+        fetch_message=AsyncMock(
+            return_value={
+                "body": {
+                    "attachments": [
+                        {
+                            "type": "audio",
+                            "payload": {
+                                "token": "audio-token",
+                                "audioId": 77,
+                                "url": "https://media.okcdn.ru/refreshed.ogg",
+                            },
+                        }
+                    ]
+                }
+            }
+        ),
+        download_file=AsyncMock(return_value=None),
+    )
+    store = MessageStore(str(tmp_path / "messages.sqlite3"))
+
+    try:
+        msg = MaxMessage(
+            chat_id=42,
+            sender_id=7,
+            text="",
+            message_id="max-audio-1",
+            attaches=[
+                {
+                    "_type": "AUDIO",
+                    "url": "https://media.okcdn.ru/stale.ogg",
+                    "token": "audio-token",
+                    "audioId": 77,
+                }
+            ],
+        )
+
+        await forward_max_message(
+            msg,
+            client=client,
+            sender=sender,
+            resolver=resolver,
+            message_store=store,
+        )
+
+        assert client.fetch_message.await_count == 1
+        assert client.fetch_message.await_args.args == ("max-audio-1",)
+        assert client.download_file_result.await_args_list[0].args == ("https://media.okcdn.ru/stale.ogg",)
+        assert client.download_file_result.await_args_list[1].args == ("https://media.okcdn.ru/refreshed.ogg",)
+        assert sender.send_voice.await_count == 1
+        assert sender.send_voice.await_args.args[0] == b"voice-bytes"
+        assert sender.send.await_count == 0
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_forward_max_audio_refresh_matches_by_audio_id(tmp_path):
+    sender = _make_media_sender()
+    resolver = _make_resolver()
+    client = SimpleNamespace(
+        download_file_result=AsyncMock(
+            side_effect=[
+                DownloadResult(status=401, used_authorization=True),
+                DownloadResult(data=b"voice-by-audio-id", status=200, used_authorization=True),
+            ]
+        ),
+        fetch_message=AsyncMock(
+            return_value={
+                "body": {
+                    "attachments": [
+                        {
+                            "type": "audio",
+                            "payload": {
+                                "token": "other-token",
+                                "audioId": 88,
+                                "url": "https://media.okcdn.ru/by-audio-id.ogg",
+                            },
+                        }
+                    ]
+                }
+            }
+        ),
+        download_file=AsyncMock(return_value=None),
+    )
+    store = MessageStore(str(tmp_path / "messages.sqlite3"))
+
+    try:
+        msg = MaxMessage(
+            chat_id=42,
+            sender_id=7,
+            text="",
+            message_id="max-audio-2",
+            attaches=[
+                {
+                    "_type": "AUDIO",
+                    "url": "https://media.okcdn.ru/expired.ogg",
+                    "audioId": 88,
+                }
+            ],
+        )
+
+        await forward_max_message(
+            msg,
+            client=client,
+            sender=sender,
+            resolver=resolver,
+            message_store=store,
+        )
+
+        assert client.fetch_message.await_args.args == ("max-audio-2",)
+        assert client.download_file_result.await_args_list[1].args == ("https://media.okcdn.ru/by-audio-id.ogg",)
+        assert sender.send_voice.await_count == 1
+        assert sender.send_voice.await_args.args[0] == b"voice-by-audio-id"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_forward_max_audio_falls_back_to_text_when_refresh_download_fails(tmp_path):
+    sender = _make_media_sender(send_message_id=7201)
+    resolver = _make_resolver()
+    client = SimpleNamespace(
+        download_file_result=AsyncMock(
+            side_effect=[
+                DownloadResult(status=403, used_authorization=True),
+                DownloadResult(status=403, used_authorization=True),
+            ]
+        ),
+        fetch_message=AsyncMock(
+            return_value={
+                "body": {
+                    "attachments": [
+                        {
+                            "type": "audio",
+                            "payload": {
+                                "token": "audio-token",
+                                "audioId": 99,
+                                "url": "https://media.okcdn.ru/refreshed-fail.ogg",
+                            },
+                        }
+                    ]
+                }
+            }
+        ),
+        download_file=AsyncMock(return_value=None),
+    )
+    store = MessageStore(str(tmp_path / "messages.sqlite3"))
+
+    try:
+        msg = MaxMessage(
+            chat_id=42,
+            sender_id=7,
+            text="",
+            message_id="max-audio-3",
+            attaches=[
+                {
+                    "_type": "AUDIO",
+                    "url": "https://media.okcdn.ru/stale-fail.ogg",
+                    "token": "audio-token",
+                    "audioId": 99,
+                }
+            ],
+        )
+
+        await forward_max_message(
+            msg,
+            client=client,
+            sender=sender,
+            resolver=resolver,
+            message_store=store,
+        )
+
+        assert sender.send_voice.await_count == 0
+        assert sender.send.await_count == 1
+        assert "[аудио]" in sender.send.await_args.args[0]
     finally:
         store.close()
 
