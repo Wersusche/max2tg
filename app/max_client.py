@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qsl, quote, urlparse
 
 import aiohttp
 
@@ -58,6 +58,7 @@ _CMD_ERROR_MARKER = "__cmd_error__"
 _ATTACHMENT_NOT_READY_CODE = "attachment.not.ready"
 _DOCUMENT_READY_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0)
 _MAX_MEDIA_HOST_SUFFIXES = ("okcdn.ru", "mycdn.me", "max.ru", "oneme.ru")
+_SIGNED_MEDIA_QUERY_KEYS = frozenset({"expires", "sig"})
 
 
 class OpCode(IntEnum):
@@ -560,12 +561,57 @@ class MaxClient:
                 return True
         return False
 
-    def _download_headers(self, url: str) -> tuple[dict[str, str], bool]:
+    @classmethod
+    def _is_signed_max_media_url(cls, url: str) -> bool:
+        if not cls._is_max_media_url(url):
+            return False
+
+        query_keys = {key.lower() for key, _ in parse_qsl(urlparse(url).query, keep_blank_values=True)}
+        return _SIGNED_MEDIA_QUERY_KEYS.issubset(query_keys)
+
+    def _download_headers(self, url: str, *, use_authorization: bool | None = None) -> tuple[dict[str, str], bool]:
         headers = dict(_HTTP_HEADERS)
-        use_authorization = self._is_max_media_url(url)
+        if use_authorization is None:
+            use_authorization = self._is_max_media_url(url)
         if use_authorization:
             headers["Authorization"] = self.token
         return headers, use_authorization
+
+    async def _download_file_once(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        headers: dict[str, str],
+        *,
+        used_authorization: bool,
+    ) -> tuple[DownloadResult, str]:
+        try:
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    return (
+                        DownloadResult(
+                            data=data,
+                            status=resp.status,
+                            used_authorization=used_authorization,
+                        ),
+                        "",
+                    )
+                body = await resp.text(errors="ignore")
+                return (
+                    DownloadResult(
+                        status=resp.status,
+                        used_authorization=used_authorization,
+                    ),
+                    body[:200],
+                )
+        except Exception:
+            log.exception("Download error: %s", url[:120])
+            return DownloadResult(used_authorization=used_authorization), ""
 
     async def _upload_bytes(
         self,
@@ -642,6 +688,9 @@ class MaxClient:
 
     async def download_file_result(self, url: str) -> DownloadResult:
         """Download a file by URL, returning payload and response metadata."""
+        if not url:
+            return DownloadResult()
+
         session = getattr(self, "_session", None)
         close_after = False
         if session is None or session.closed:
@@ -650,39 +699,64 @@ class MaxClient:
 
         headers, used_authorization = self._download_headers(url)
         try:
-            async with session.get(
+            result, body = await self._download_file_once(
+                session,
                 url,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=120),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.read()
+                headers,
+                used_authorization=used_authorization,
+            )
+            if result.data is not None:
+                log.info(
+                    "Downloaded %s (%d bytes, authorized=%s)",
+                    url[:120],
+                    len(result.data),
+                    result.used_authorization,
+                )
+                return result
+
+            should_retry_anonymously = (
+                result.used_authorization
+                and result.status in {400, 401, 403}
+                and self._is_signed_max_media_url(url)
+            )
+            if should_retry_anonymously:
+                log.info(
+                    "Download failed %s - HTTP %s with Authorization; retrying anonymously for signed media URL",
+                    url[:120],
+                    result.status,
+                )
+                retry_headers, retry_used_authorization = self._download_headers(url, use_authorization=False)
+                retry_result, retry_body = await self._download_file_once(
+                    session,
+                    url,
+                    retry_headers,
+                    used_authorization=retry_used_authorization,
+                )
+                if retry_result.data is not None:
                     log.info(
                         "Downloaded %s (%d bytes, authorized=%s)",
                         url[:120],
-                        len(data),
-                        used_authorization,
+                        len(retry_result.data),
+                        retry_result.used_authorization,
                     )
-                    return DownloadResult(
-                        data=data,
-                        status=resp.status,
-                        used_authorization=used_authorization,
-                    )
-                body = await resp.text(errors="ignore")
+                    return retry_result
                 log.warning(
-                    "Download failed %s - HTTP %d (authorized=%s): %s",
+                    "Download failed %s - authorized HTTP %s, anonymous HTTP %s: %s",
                     url[:120],
-                    resp.status,
-                    used_authorization,
-                    body[:200],
+                    result.status,
+                    retry_result.status,
+                    retry_body or body,
                 )
-                return DownloadResult(
-                    status=resp.status,
-                    used_authorization=used_authorization,
-                )
-        except Exception:
-            log.exception("Download error: %s", url[:120])
-            return DownloadResult(used_authorization=used_authorization)
+                return retry_result
+
+            log.warning(
+                "Download failed %s - HTTP %s (authorized=%s): %s",
+                url[:120],
+                result.status,
+                result.used_authorization,
+                body,
+            )
+            return result
         finally:
             if close_after:
                 await session.close()

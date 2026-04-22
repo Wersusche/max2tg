@@ -82,92 +82,10 @@ def _extract_attach_url(attach: dict) -> str | None:
     )
 
 
-def _normalize_message_attach(attach: dict) -> dict:
-    normalized = dict(attach)
-    payload = normalized.get("payload")
-    if isinstance(payload, dict):
-        merged = dict(payload)
-        for key, value in normalized.items():
-            if key == "payload":
-                continue
-            merged.setdefault(key, value)
-        normalized = merged
-
-    atype = normalized.get("_type") or attach.get("_type") or attach.get("type")
-    if isinstance(atype, str) and atype:
-        normalized["_type"] = atype.upper()
-    return normalized
-
-
-def _extract_message_attaches(payload: dict) -> list[dict]:
-    if not isinstance(payload, dict):
-        return []
-
-    roots: list[dict] = []
-    message = payload.get("message")
-    if isinstance(message, dict):
-        roots.append(message)
-    roots.append(payload)
-
-    for root in roots:
-        attaches = root.get("attaches")
-        if isinstance(attaches, list):
-            return [_normalize_message_attach(attach) for attach in attaches if isinstance(attach, dict)]
-
-        body = root.get("body")
-        if isinstance(body, dict):
-            attachments = body.get("attachments")
-            if isinstance(attachments, list):
-                return [_normalize_message_attach(attach) for attach in attachments if isinstance(attach, dict)]
-
-    return []
-
-
-def _find_matching_audio_attach(payload: dict, attach: dict) -> dict:
-    attaches = [candidate for candidate in _extract_message_attaches(payload) if candidate.get("_type") == "AUDIO"]
-    if not attaches:
-        return {}
-
-    token = attach.get("token")
-    if isinstance(token, str) and token:
-        for candidate in attaches:
-            if candidate.get("token") == token:
-                return candidate
-
-    audio_id = attach.get("audioId")
-    if audio_id is not None and str(audio_id):
-        for candidate in attaches:
-            if candidate.get("audioId") is not None and str(candidate.get("audioId")) == str(audio_id):
-                return candidate
-
-    return {}
-
-
-async def _download_audio_data(
-    attach: dict,
-    client: MaxClient,
-    *,
-    source_message_id: str | None = None,
-) -> bytes | None:
+async def _download_audio_data(attach: dict, client: MaxClient) -> bytes | None:
     url = _extract_attach_url(attach)
-    initial_result = await client.download_file_result(url) if url else None
-    if initial_result and initial_result.data:
-        return initial_result.data
-
-    if not source_message_id or not (attach.get("token") or attach.get("audioId")):
-        return None
-
-    if initial_result is not None and initial_result.status not in {400, 401, 403} and initial_result.data is not None:
-        return None
-
-    refreshed_message = await client.fetch_message(source_message_id)
-    refreshed_attach = _find_matching_audio_attach(refreshed_message, attach)
-    refreshed_url = _extract_attach_url(refreshed_attach) if refreshed_attach else None
-    if not refreshed_url:
-        return None
-
-    log.info("Retrying AUDIO download from refreshed message payload for message_id=%s", source_message_id)
-    return (await client.download_file_result(refreshed_url)).data
+    result = await client.download_file_result(url) if url else None
+    return result.data if result else None
 
 
 def _guess_media_kind(filename: str) -> str:
@@ -187,7 +105,6 @@ async def _send_attach(
     sender: Any,
     header_text: str,
     *,
-    source_message_id: str | None = None,
     message_thread_id: int | None = None,
     reply_to_message_id: int | None = None,
     raise_bad_request: bool = False,
@@ -282,11 +199,7 @@ async def _send_attach(
         )
 
     if atype == "AUDIO":
-        data = await _download_audio_data(
-            attach,
-            client,
-            source_message_id=source_message_id,
-        )
+        data = await _download_audio_data(attach, client)
         if data:
             return await sender.send_voice(
                 data,
@@ -295,6 +208,7 @@ async def _send_attach(
                 reply_to_message_id=reply_to_message_id,
                 raise_bad_request=raise_bad_request,
             )
+        log.warning("Audio download unavailable; sent text fallback")
         return await sender.send(
             f"{header_text}\n<i>[аудио]</i>",
             message_thread_id=message_thread_id,
@@ -407,7 +321,6 @@ async def _handle_linked_message(
             prefix = f"↩ <b>Ответ на {fwd_sender_label}</b>"
 
     full_header = f"{header_text}\n{prefix}"
-    source_message_id = _extract_linked_max_message_id(link)
     fwd_meaningful = [
         a
         for a in fwd_attaches
@@ -429,7 +342,6 @@ async def _handle_linked_message(
                 client,
                 sender,
                 cap,
-                source_message_id=source_message_id,
                 message_thread_id=message_thread_id,
                 raise_bad_request=raise_bad_request,
             )
@@ -622,7 +534,6 @@ async def _send_current_message_content(
                 client,
                 sender,
                 cap,
-                source_message_id=msg.message_id or None,
                 message_thread_id=message_thread_id,
                 reply_to_message_id=reply_to_message_id,
                 raise_bad_request=raise_bad_request,
