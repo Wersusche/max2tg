@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
+from urllib.parse import quote, urlparse
 
 import aiohttp
 
@@ -56,6 +57,7 @@ _PLATFORM_API_BASE_URL = "https://platform-api.max.ru"
 _CMD_ERROR_MARKER = "__cmd_error__"
 _ATTACHMENT_NOT_READY_CODE = "attachment.not.ready"
 _DOCUMENT_READY_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0)
+_MAX_MEDIA_HOST_SUFFIXES = ("okcdn.ru", "mycdn.me", "max.ru", "oneme.ru")
 
 
 class OpCode(IntEnum):
@@ -87,6 +89,13 @@ class MaxMessage:
     attaches: list = field(default_factory=list)
     link: dict = field(default_factory=dict)
     raw: dict = field(default_factory=dict)
+
+
+@dataclass
+class DownloadResult:
+    data: bytes | None = None
+    status: int | None = None
+    used_authorization: bool = False
 
 
 class MaxClient:
@@ -539,6 +548,25 @@ class MaxClient:
             "Authorization": self.token,
         }
 
+    @staticmethod
+    def _is_max_media_url(url: str) -> bool:
+        hostname = urlparse(url).hostname
+        if not hostname:
+            return False
+
+        host = hostname.lower().rstrip(".")
+        for suffix in _MAX_MEDIA_HOST_SUFFIXES:
+            if host == suffix or host.endswith(f".{suffix}"):
+                return True
+        return False
+
+    def _download_headers(self, url: str) -> tuple[dict[str, str], bool]:
+        headers = dict(_HTTP_HEADERS)
+        use_authorization = self._is_max_media_url(url)
+        if use_authorization:
+            headers["Authorization"] = self.token
+        return headers, use_authorization
+
     async def _upload_bytes(
         self,
         url: str,
@@ -578,30 +606,90 @@ class MaxClient:
                 await session.close()
         return {}
 
-    async def download_file(self, url: str) -> bytes | None:
-        """Download a file by URL, returning raw bytes or None on failure."""
+    async def fetch_message(self, message_id: str) -> dict:
+        """Fetch a message payload from the documented platform API."""
+        if not message_id:
+            return {}
+
         session = getattr(self, "_session", None)
         close_after = False
         if session is None or session.closed:
             session = aiohttp.ClientSession(headers=_BROWSER_HEADERS)
             close_after = True
+
+        request_url = f"{_PLATFORM_API_BASE_URL}/messages/{quote(str(message_id), safe='')}"
+        try:
+            async with session.get(
+                request_url,
+                headers=self._platform_api_headers(),
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json(content_type=None)
+                body = await resp.text(errors="ignore")
+                log.warning(
+                    "Fetch message failed %s - HTTP %d: %s",
+                    request_url[:120],
+                    resp.status,
+                    body[:500],
+                )
+        except Exception:
+            log.exception("Fetch message error: %s", request_url[:120])
+        finally:
+            if close_after:
+                await session.close()
+        return {}
+
+    async def download_file_result(self, url: str) -> DownloadResult:
+        """Download a file by URL, returning payload and response metadata."""
+        session = getattr(self, "_session", None)
+        close_after = False
+        if session is None or session.closed:
+            session = aiohttp.ClientSession(headers=_BROWSER_HEADERS)
+            close_after = True
+
+        headers, used_authorization = self._download_headers(url)
         try:
             async with session.get(
                 url,
-                headers=_HTTP_HEADERS,
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=120),
             ) as resp:
                 if resp.status == 200:
                     data = await resp.read()
-                    log.info("Downloaded %s (%d bytes)", url[:120], len(data))
-                    return data
-                log.warning("Download failed %s - HTTP %d", url[:120], resp.status)
+                    log.info(
+                        "Downloaded %s (%d bytes, authorized=%s)",
+                        url[:120],
+                        len(data),
+                        used_authorization,
+                    )
+                    return DownloadResult(
+                        data=data,
+                        status=resp.status,
+                        used_authorization=used_authorization,
+                    )
+                body = await resp.text(errors="ignore")
+                log.warning(
+                    "Download failed %s - HTTP %d (authorized=%s): %s",
+                    url[:120],
+                    resp.status,
+                    used_authorization,
+                    body[:200],
+                )
+                return DownloadResult(
+                    status=resp.status,
+                    used_authorization=used_authorization,
+                )
         except Exception:
             log.exception("Download error: %s", url[:120])
+            return DownloadResult(used_authorization=used_authorization)
         finally:
             if close_after:
                 await session.close()
-        return None
+
+    async def download_file(self, url: str) -> bytes | None:
+        """Download a file by URL, returning raw bytes or None on failure."""
+        return (await self.download_file_result(url)).data
 
     def _parse_message(self, payload: dict) -> MaxMessage | None:
         msg_body = payload.get("message")
