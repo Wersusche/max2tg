@@ -531,7 +531,7 @@ class TestSendHelpers:
         assert payload == "https://example.com/video-1080.mp4"
         client.cmd.assert_awaited_once_with(
             OpCode.VIDEO_DOWNLOAD_URL,
-            {"videoId": 77, "chatId": 42, "messageId": "max-video-1", "token": "video-token"},
+            {"videoId": 77, "chatId": 42, "messageId": "max-video-1"},
         )
 
     @pytest.mark.asyncio
@@ -542,6 +542,33 @@ class TestSendHelpers:
         payload = await client.fetch_video_download_url(video_id=77, chat_id=42, message_id="max-video-1")
 
         assert payload is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_video_download_url_retries_when_first_attempt_has_non_mp4_url(self):
+        client = MaxClient(token="auth-token", device_id="dev")
+        client.cmd = AsyncMock(
+            side_effect=[
+                {"url": "https://maxvd692.okcdn.ru/?expires=1&type=0&sig=bad"},
+                {"MP4_720": "https://example.com/video-720.mp4"},
+            ]
+        )
+
+        payload = await client.fetch_video_download_url(
+            video_id=77,
+            chat_id=42,
+            message_id="max-video-2",
+            token="attach-token",
+        )
+
+        assert payload == "https://example.com/video-720.mp4"
+        assert client.cmd.await_args_list[0].args == (
+            OpCode.VIDEO_DOWNLOAD_URL,
+            {"videoId": 77, "chatId": 42, "messageId": "max-video-2"},
+        )
+        assert client.cmd.await_args_list[1].args == (
+            OpCode.VIDEO_DOWNLOAD_URL,
+            {"videoId": 77, "chatId": 42, "messageId": "max-video-2", "token": "attach-token"},
+        )
 
     @pytest.mark.asyncio
     async def test_download_file_uses_authorization_for_max_media_urls(self):

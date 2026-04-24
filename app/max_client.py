@@ -762,37 +762,71 @@ class MaxClient:
             )
             return None
 
-        request_payload: dict[str, Any] = {
-            "videoId": normalized_video_id,
-            "chatId": normalized_chat_id,
-            "messageId": str(message_id),
-        }
+        request_payloads: list[dict[str, Any]] = [
+            {
+                "videoId": normalized_video_id,
+                "chatId": normalized_chat_id,
+                "messageId": str(message_id),
+            }
+        ]
         if isinstance(token, str) and token:
-            request_payload["token"] = token
-
-        response_payload = await self.cmd(OpCode.VIDEO_DOWNLOAD_URL, request_payload)
-        cmd_error = self._extract_cmd_error(response_payload)
-        if cmd_error is not None:
-            log.warning(
-                "Fetch video download URL failed video_id=%s chat_id=%s message_id=%s: %s",
-                normalized_video_id,
-                normalized_chat_id,
-                message_id,
-                cmd_error,
+            request_payloads.append(
+                {
+                    "videoId": normalized_video_id,
+                    "chatId": normalized_chat_id,
+                    "messageId": str(message_id),
+                    "token": token,
+                }
             )
-            return None
+        request_payloads.append({"videoId": normalized_video_id, "token": self.token})
+        request_payloads.append({"videoId": normalized_video_id})
 
-        url = self._extract_video_http_url(response_payload)
-        if url:
-            return url
+        seen_payloads: set[tuple[tuple[str, Any], ...]] = set()
+        last_payload_preview: Any = None
 
-        payload_preview = list(response_payload.keys()) if isinstance(response_payload, dict) else type(response_payload).__name__
+        for index, request_payload in enumerate(request_payloads, start=1):
+            payload_key = tuple(sorted(request_payload.items()))
+            if payload_key in seen_payloads:
+                continue
+            seen_payloads.add(payload_key)
+
+            response_payload = await self.cmd(OpCode.VIDEO_DOWNLOAD_URL, request_payload)
+            cmd_error = self._extract_cmd_error(response_payload)
+            if cmd_error is not None:
+                log.warning(
+                    "Fetch video download URL attempt=%d failed video_id=%s chat_id=%s message_id=%s: %s",
+                    index,
+                    normalized_video_id,
+                    normalized_chat_id,
+                    message_id,
+                    cmd_error,
+                )
+                continue
+
+            url = self._extract_video_http_url(response_payload)
+            if url:
+                log.info(
+                    "Resolved video download URL via websocket attempt=%d video_id=%s keys=%s",
+                    index,
+                    normalized_video_id,
+                    list(response_payload.keys()) if isinstance(response_payload, dict) else type(response_payload).__name__,
+                )
+                return url
+
+            last_payload_preview = list(response_payload.keys()) if isinstance(response_payload, dict) else type(response_payload).__name__
+            log.info(
+                "Video download URL attempt=%d returned no MP4 candidate for video_id=%s payload=%s",
+                index,
+                normalized_video_id,
+                last_payload_preview,
+            )
+
         log.warning(
-            "Fetch video download URL returned no URL for video_id=%s chat_id=%s message_id=%s payload=%s",
+            "Fetch video download URL returned no MP4 URL for video_id=%s chat_id=%s message_id=%s payload=%s",
             normalized_video_id,
             normalized_chat_id,
             message_id,
-            payload_preview,
+            last_payload_preview,
         )
         return None
 
@@ -986,7 +1020,6 @@ class MaxClient:
     @staticmethod
     def _extract_video_http_url(payload: Any) -> str | None:
         mp4_candidates: list[tuple[int, str]] = []
-        fallback_candidates: list[str] = []
 
         def _quality_from_key(key: str) -> int:
             best = 0
@@ -997,18 +1030,14 @@ class MaxClient:
 
         def _collect(value: Any) -> None:
             if isinstance(value, str):
-                if value.startswith("http"):
-                    fallback_candidates.append(value)
                 return
 
             if isinstance(value, dict):
                 for key, nested in value.items():
                     if isinstance(nested, str) and nested.startswith("http"):
                         key_upper = str(key).upper()
-                        if key_upper.startswith("MP4") or "MP4" in key_upper:
+                        if key_upper.startswith("MP4") or "MP4" in key_upper or nested.lower().endswith(".mp4"):
                             mp4_candidates.append((_quality_from_key(key_upper), nested))
-                        else:
-                            fallback_candidates.append(nested)
                         continue
                     _collect(nested)
                 return
@@ -1023,7 +1052,7 @@ class MaxClient:
             mp4_candidates.sort(key=lambda item: item[0], reverse=True)
             return mp4_candidates[0][1]
 
-        return fallback_candidates[0] if fallback_candidates else None
+        return None
 
     @staticmethod
     def _wrap_cmd_error(payload: Any) -> dict:
