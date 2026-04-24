@@ -1186,16 +1186,30 @@ class MaxClient:
         if not video_id:
             return None
 
-        page_variants = (
+        page_variants = [
             f"https://ok.ru/videoembed/{video_id}",
             f"https://ok.ru/video/{video_id}",
-        )
+            f"https://ok.ru/web-api/video/moviePlayer/{video_id}",
+        ]
+        seen_pages: set[str] = set()
         last_reason = "webpage missing"
-        for desktop_url in page_variants:
+        queue_index = 0
+        while queue_index < len(page_variants):
+            desktop_url = page_variants[queue_index]
+            queue_index += 1
+            if desktop_url in seen_pages:
+                continue
+            seen_pages.add(desktop_url)
+
             webpage = await self._fetch_text_page(desktop_url)
             if not webpage:
                 last_reason = f"fetch failed for {desktop_url}"
                 continue
+
+            discovered_urls = self._extract_okru_movie_player_urls(webpage, video_id)
+            for nested_url in reversed(discovered_urls):
+                if nested_url not in seen_pages and nested_url not in page_variants:
+                    page_variants.insert(queue_index, nested_url)
 
             player = self._extract_okru_player_data(webpage)
             if not isinstance(player, dict):
@@ -1330,6 +1344,31 @@ class MaxClient:
             if "metadata" in flashvars or "metadataUrl" in flashvars:
                 return flashvars
         return None
+
+    @staticmethod
+    def _extract_okru_movie_player_urls(text: str, video_id: str) -> list[str]:
+        candidates: list[str] = []
+        seen: set[str] = set()
+        patterns = (
+            rf"https?://[^\s\"'<>]+/web-api/video/moviePlayer/{re.escape(video_id)}(?:#[^\s\"'<>]*)?",
+            rf"//[^\s\"'<>]+/web-api/video/moviePlayer/{re.escape(video_id)}(?:#[^\s\"'<>]*)?",
+            rf"(?<![:\w.])/web-api/video/moviePlayer/{re.escape(video_id)}(?:#[^\s\"'<>]*)?",
+        )
+
+        for source in (text, html.unescape(text)):
+            normalized_source = source.replace("\\/", "/")
+            for pattern in patterns:
+                for match in re.finditer(pattern, normalized_source):
+                    url = match.group(0).split("#", 1)[0]
+                    if url.startswith("//"):
+                        url = f"https:{url}"
+                    elif url.startswith("/"):
+                        url = f"https://ok.ru{url}"
+                    if url.startswith("http") and url not in seen:
+                        seen.add(url)
+                        candidates.append(url)
+
+        return candidates
 
     async def _extract_okru_metadata(self, video_id: str, flashvars: dict) -> dict | None:
         metadata = flashvars.get("metadata")

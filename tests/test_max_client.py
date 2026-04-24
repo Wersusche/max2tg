@@ -701,6 +701,19 @@ class TestSendHelpers:
             }
         }
 
+    def test_extract_okru_movie_player_urls_supports_absolute_and_protocol_relative_links(self):
+        webpage = (
+            '<a href="https://wg31.ok.ru/web-api/video/moviePlayer/14261721980814#abc">video</a>'
+            '<script>var url = "\\/\\/wg32.ok.ru\\/web-api\\/video\\/moviePlayer\\/14261721980814#def";</script>'
+        )
+
+        payload = MaxClient._extract_okru_movie_player_urls(webpage, "14261721980814")
+
+        assert payload == [
+            "https://wg31.ok.ru/web-api/video/moviePlayer/14261721980814",
+            "https://wg32.ok.ru/web-api/video/moviePlayer/14261721980814",
+        ]
+
     @pytest.mark.asyncio
     async def test_resolve_okru_desktop_video_url_uses_videoembed_before_video_page(self):
         client = MaxClient(token="tok", device_id="dev")
@@ -726,6 +739,34 @@ class TestSendHelpers:
         client._fetch_json_page.assert_awaited_once()
         assert client._fetch_json_page.await_args.args[0] == "https://ok.ru/metadata"
         assert client._fetch_json_page.await_args.kwargs["data"] == {"st.location": "SEARCH"}
+
+    @pytest.mark.asyncio
+    async def test_resolve_okru_desktop_video_url_discovers_movie_player_page_from_video_html(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client._fetch_text_page = AsyncMock(
+            side_effect=[
+                None,
+                '<a href="https://wg31.ok.ru/web-api/video/moviePlayer/14261721980814#abc">video</a>',
+                '<div data-attributes="{&quot;flashvars&quot;:{&quot;metadataUrl&quot;:&quot;https%3A%2F%2Fok.ru%2Fmetadata&quot;}}"></div>',
+            ]
+        )
+        client._fetch_json_page = AsyncMock(
+            return_value={
+                "videos": [
+                    {"name": "mobile", "url": "https://cdn.example/video-240.mp4"},
+                    {"name": "hd", "url": "https://cdn.example/video-720.mp4"},
+                ]
+            }
+        )
+
+        payload = await client._resolve_okru_desktop_video_url("https://m.ok.ru/video/14261721980814")
+
+        assert payload == "https://cdn.example/video-720.mp4"
+        assert [call.args[0] for call in client._fetch_text_page.await_args_list] == [
+            "https://ok.ru/videoembed/14261721980814",
+            "https://ok.ru/video/14261721980814",
+            "https://wg31.ok.ru/web-api/video/moviePlayer/14261721980814",
+        ]
 
     @pytest.mark.asyncio
     async def test_download_file_uses_authorization_for_max_media_urls(self):
