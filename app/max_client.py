@@ -974,8 +974,6 @@ class MaxClient:
                     "token": token,
                 }
             )
-        request_payloads.append({"videoId": video_id, "token": self.token})
-        request_payloads.append({"videoId": video_id})
 
         unique_payloads: list[dict[str, Any]] = []
         seen_payloads: set[tuple[tuple[str, Any], ...]] = set()
