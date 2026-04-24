@@ -99,12 +99,169 @@ def _guess_media_kind(filename: str) -> str:
     return "document"
 
 
+def _extract_rest_message_attachments(payload: Any) -> list[dict]:
+    if not isinstance(payload, dict):
+        return []
+
+    body = payload.get("body")
+    if isinstance(body, dict):
+        attachments = body.get("attachments")
+        if isinstance(attachments, list):
+            return [attach for attach in attachments if isinstance(attach, dict)]
+
+    message = payload.get("message")
+    if isinstance(message, dict):
+        nested_body = message.get("body")
+        if isinstance(nested_body, dict):
+            attachments = nested_body.get("attachments")
+            if isinstance(attachments, list):
+                return [attach for attach in attachments if isinstance(attach, dict)]
+
+    return []
+
+
+def _extract_rest_file_token(attach: dict) -> str | None:
+    payload = attach.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    token = payload.get("token")
+    if isinstance(token, str) and token:
+        return token
+    return None
+
+
+def _extract_rest_file_url(attach: dict) -> str | None:
+    payload = attach.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    url = payload.get("url")
+    if isinstance(url, str) and url.startswith("http"):
+        return url
+    return None
+
+
+def _extract_rest_file_name(attach: dict) -> str | None:
+    for key in ("filename", "name", "title"):
+        value = attach.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _extract_rest_file_attachments(payload: Any) -> list[dict]:
+    return [
+        attach
+        for attach in _extract_rest_message_attachments(payload)
+        if str(attach.get("type", "")).lower() == "file"
+    ]
+
+
+def _match_rest_file_attachment(rest_attachments: list[dict], incoming_attach: dict) -> dict | None:
+    incoming_token = incoming_attach.get("token") or incoming_attach.get("fileToken")
+    if isinstance(incoming_token, str) and incoming_token:
+        for rest_attach in rest_attachments:
+            if _extract_rest_file_token(rest_attach) == incoming_token:
+                return rest_attach
+
+    incoming_name = incoming_attach.get("name")
+    if isinstance(incoming_name, str) and incoming_name:
+        incoming_name_folded = incoming_name.casefold()
+        for rest_attach in rest_attachments:
+            rest_name = _extract_rest_file_name(rest_attach)
+            if isinstance(rest_name, str) and rest_name.casefold() == incoming_name_folded:
+                return rest_attach
+
+    if len(rest_attachments) == 1:
+        return rest_attachments[0]
+
+    return None
+
+
+async def _hydrate_file_attach(
+    attach: dict,
+    client: MaxClient,
+    *,
+    message_id: str | None,
+) -> dict | None:
+    if not message_id:
+        log.warning("FILE attach missing source message_id; cannot hydrate URL")
+        return None
+
+    fetch_message = getattr(client, "fetch_message", None)
+    if not callable(fetch_message):
+        log.warning("FILE attach cannot hydrate URL for message_id=%s: fetch_message unavailable", message_id)
+        return None
+
+    fetched_message = await fetch_message(message_id)
+    rest_attachments = _extract_rest_file_attachments(fetched_message)
+    if not rest_attachments:
+        log.warning("FILE attach fetch_message(message_id=%s) returned no usable attachment", message_id)
+        return None
+
+    matched_attach = _match_rest_file_attachment(rest_attachments, attach)
+    if matched_attach is None:
+        log.warning(
+            "FILE attach token/filename match failed for message_id=%s token=%r name=%r candidates=%d",
+            message_id,
+            attach.get("token") or attach.get("fileToken"),
+            attach.get("name"),
+            len(rest_attachments),
+        )
+        return None
+
+    if _extract_rest_file_url(matched_attach) is None:
+        log.warning("FILE attach for message_id=%s matched fetched attachment without payload.url", message_id)
+        return None
+
+    return matched_attach
+
+
+async def _send_downloaded_file(
+    sender: Any,
+    data: bytes,
+    *,
+    filename: str,
+    header_text: str,
+    message_thread_id: int | None = None,
+    reply_to_message_id: int | None = None,
+    raise_bad_request: bool = False,
+):
+    kind = _guess_media_kind(filename)
+    if kind == "photo":
+        return await sender.send_photo(
+            data,
+            caption=header_text,
+            filename=filename,
+            message_thread_id=message_thread_id,
+            reply_to_message_id=reply_to_message_id,
+            raise_bad_request=raise_bad_request,
+        )
+    if kind == "video":
+        return await sender.send_video(
+            data,
+            caption=header_text,
+            filename=filename,
+            message_thread_id=message_thread_id,
+            reply_to_message_id=reply_to_message_id,
+            raise_bad_request=raise_bad_request,
+        )
+    return await sender.send_document(
+        data,
+        caption=header_text,
+        filename=filename,
+        message_thread_id=message_thread_id,
+        reply_to_message_id=reply_to_message_id,
+        raise_bad_request=raise_bad_request,
+    )
+
+
 async def _send_attach(
     attach: dict,
     client: MaxClient,
     sender: Any,
     header_text: str,
     *,
+    message_id: str | None = None,
     message_thread_id: int | None = None,
     reply_to_message_id: int | None = None,
     raise_bad_request: bool = False,
@@ -160,32 +317,25 @@ async def _send_attach(
         name = attach.get("name", "file")
         size = attach.get("size", 0)
         token_url = _extract_attach_url(attach) or _extract_file_url(attach)
+        if not token_url:
+            hydrated_attach = await _hydrate_file_attach(
+                attach,
+                client,
+                message_id=message_id,
+            )
+            if hydrated_attach is not None:
+                token_url = _extract_rest_file_url(hydrated_attach)
+                hydrated_name = _extract_rest_file_name(hydrated_attach)
+                if hydrated_name:
+                    name = hydrated_name
         if token_url:
             data = await client.download_file(token_url)
             if data:
-                kind = _guess_media_kind(name)
-                if kind == "photo":
-                    return await sender.send_photo(
-                        data,
-                        caption=header_text,
-                        filename=name,
-                        message_thread_id=message_thread_id,
-                        reply_to_message_id=reply_to_message_id,
-                        raise_bad_request=raise_bad_request,
-                    )
-                if kind == "video":
-                    return await sender.send_video(
-                        data,
-                        caption=header_text,
-                        filename=name,
-                        message_thread_id=message_thread_id,
-                        reply_to_message_id=reply_to_message_id,
-                        raise_bad_request=raise_bad_request,
-                    )
-                return await sender.send_document(
+                return await _send_downloaded_file(
+                    sender,
                     data,
-                    caption=header_text,
                     filename=name,
+                    header_text=header_text,
                     message_thread_id=message_thread_id,
                     reply_to_message_id=reply_to_message_id,
                     raise_bad_request=raise_bad_request,
@@ -303,6 +453,7 @@ async def _handle_linked_message(
     raise_bad_request: bool = False,
 ) -> int | None:
     inner = link.get("message") or link
+    linked_message_id = _extract_linked_max_message_id(link)
     fwd_sender_id = inner.get("sender") or link.get("sender")
     fwd_text = inner.get("text", "") or link.get("text", "")
     fwd_attaches = inner.get("attaches") or link.get("attaches") or []
@@ -342,6 +493,7 @@ async def _handle_linked_message(
                 client,
                 sender,
                 cap,
+                message_id=linked_message_id,
                 message_thread_id=message_thread_id,
                 raise_bad_request=raise_bad_request,
             )
@@ -534,6 +686,7 @@ async def _send_current_message_content(
                 client,
                 sender,
                 cap,
+                message_id=msg.message_id or None,
                 message_thread_id=message_thread_id,
                 reply_to_message_id=reply_to_message_id,
                 raise_bad_request=raise_bad_request,

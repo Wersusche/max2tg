@@ -31,15 +31,37 @@ def _make_resolver():
 
 
 def _make_media_sender(*, send_message_id: int = 7001, voice_message_id: int = 7101):
+    media_result = SimpleNamespace(message_id=send_message_id + 1)
     return SimpleNamespace(
         chat_id="-100",
         send=AsyncMock(return_value=SimpleNamespace(message_id=send_message_id)),
-        send_photo=AsyncMock(),
-        send_document=AsyncMock(),
-        send_video=AsyncMock(),
+        send_photo=AsyncMock(return_value=media_result),
+        send_document=AsyncMock(return_value=media_result),
+        send_video=AsyncMock(return_value=media_result),
         send_voice=AsyncMock(return_value=SimpleNamespace(message_id=voice_message_id)),
         send_sticker=AsyncMock(),
     )
+
+
+def _rest_file_attachment(
+    *,
+    url: str | None,
+    token: str | None,
+    filename: str,
+    size: int = 0,
+):
+    payload = {}
+    if url is not None:
+        payload["url"] = url
+    if token is not None:
+        payload["token"] = token
+
+    return {
+        "type": "file",
+        "payload": payload,
+        "filename": filename,
+        "size": size,
+    }
 
 
 @pytest.mark.asyncio
@@ -297,3 +319,307 @@ async def test_forward_max_message_uses_display_name_after_string_contact_resolu
         assert "<b>7</b>" not in payload
     finally:
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_forward_max_file_hydrates_document_from_fetched_message():
+    sender = _make_media_sender()
+    resolver = _make_resolver()
+    client = SimpleNamespace(
+        download_file=AsyncMock(return_value=b"file-bytes"),
+        fetch_message=AsyncMock(
+            return_value={
+                "body": {
+                    "attachments": [
+                        _rest_file_attachment(
+                            url="https://example.com/report.pdf",
+                            token="file-token",
+                            filename="report.pdf",
+                            size=123,
+                        )
+                    ]
+                }
+            }
+        ),
+    )
+
+    msg = MaxMessage(
+        chat_id=42,
+        sender_id=7,
+        text="",
+        message_id="max-file-1",
+        attaches=[
+            {
+                "_type": "FILE",
+                "name": "report.pdf",
+                "size": 123,
+                "fileId": 91,
+                "token": "file-token",
+            }
+        ],
+    )
+
+    await forward_max_message(
+        msg,
+        client=client,
+        sender=sender,
+        resolver=resolver,
+    )
+
+    client.fetch_message.assert_awaited_once_with("max-file-1")
+    client.download_file.assert_awaited_once_with("https://example.com/report.pdf")
+    sender.send_document.assert_awaited_once()
+    assert sender.send_document.await_args.args[0] == b"file-bytes"
+    assert sender.send_document.await_args.kwargs["filename"] == "report.pdf"
+    assert sender.send.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_forward_max_file_prefers_token_match_over_filename_match():
+    sender = _make_media_sender()
+    resolver = _make_resolver()
+    client = SimpleNamespace(
+        download_file=AsyncMock(return_value=b"file-bytes"),
+        fetch_message=AsyncMock(
+            return_value={
+                "body": {
+                    "attachments": [
+                        _rest_file_attachment(
+                            url="https://example.com/by-name.pdf",
+                            token="other-token",
+                            filename="report.pdf",
+                        ),
+                        _rest_file_attachment(
+                            url="https://example.com/by-token.pdf",
+                            token="wanted-token",
+                            filename="token-wins.pdf",
+                        ),
+                    ]
+                }
+            }
+        ),
+    )
+
+    msg = MaxMessage(
+        chat_id=42,
+        sender_id=7,
+        text="",
+        message_id="max-file-2",
+        attaches=[
+            {
+                "_type": "FILE",
+                "name": "report.pdf",
+                "size": 100,
+                "fileId": 92,
+                "token": "wanted-token",
+            }
+        ],
+    )
+
+    await forward_max_message(
+        msg,
+        client=client,
+        sender=sender,
+        resolver=resolver,
+    )
+
+    client.download_file.assert_awaited_once_with("https://example.com/by-token.pdf")
+    assert sender.send_document.await_args.kwargs["filename"] == "token-wins.pdf"
+
+
+@pytest.mark.asyncio
+async def test_forward_max_file_uses_filename_match_when_token_missing():
+    sender = _make_media_sender()
+    resolver = _make_resolver()
+    client = SimpleNamespace(
+        download_file=AsyncMock(return_value=b"file-bytes"),
+        fetch_message=AsyncMock(
+            return_value={
+                "message": {
+                    "body": {
+                        "attachments": [
+                            _rest_file_attachment(
+                                url="https://example.com/other.pdf",
+                                token="other-token",
+                                filename="other.pdf",
+                            ),
+                            _rest_file_attachment(
+                                url="https://example.com/by-filename.pdf",
+                                token="filename-token",
+                                filename="report.pdf",
+                            ),
+                        ]
+                    }
+                }
+            }
+        ),
+    )
+
+    msg = MaxMessage(
+        chat_id=42,
+        sender_id=7,
+        text="",
+        message_id="max-file-3",
+        attaches=[
+            {
+                "_type": "FILE",
+                "name": "report.pdf",
+                "size": 100,
+                "fileId": 93,
+            }
+        ],
+    )
+
+    await forward_max_message(
+        msg,
+        client=client,
+        sender=sender,
+        resolver=resolver,
+    )
+
+    client.download_file.assert_awaited_once_with("https://example.com/by-filename.pdf")
+    assert sender.send_document.await_args.kwargs["filename"] == "report.pdf"
+
+
+@pytest.mark.asyncio
+async def test_forward_max_file_falls_back_to_text_when_fetched_attachment_has_no_url():
+    sender = _make_media_sender(send_message_id=7201)
+    resolver = _make_resolver()
+    client = SimpleNamespace(
+        download_file=AsyncMock(return_value=b"file-bytes"),
+        fetch_message=AsyncMock(
+            return_value={
+                "body": {
+                    "attachments": [
+                        _rest_file_attachment(
+                            url=None,
+                            token="file-token",
+                            filename="report.pdf",
+                            size=123,
+                        )
+                    ]
+                }
+            }
+        ),
+    )
+
+    msg = MaxMessage(
+        chat_id=42,
+        sender_id=7,
+        text="",
+        message_id="max-file-4",
+        attaches=[
+            {
+                "_type": "FILE",
+                "name": "report.pdf",
+                "size": 123,
+                "fileId": 94,
+                "token": "file-token",
+            }
+        ],
+    )
+
+    await forward_max_message(
+        msg,
+        client=client,
+        sender=sender,
+        resolver=resolver,
+    )
+
+    client.fetch_message.assert_awaited_once_with("max-file-4")
+    client.download_file.assert_not_awaited()
+    sender.send_document.assert_not_awaited()
+    assert sender.send.await_count == 1
+    assert "report.pdf" in sender.send.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_forward_max_forwarded_file_uses_linked_message_id_for_hydration():
+    sender = _make_media_sender()
+    resolver = _make_resolver()
+    client = SimpleNamespace(
+        download_file=AsyncMock(return_value=b"linked-file-bytes"),
+        fetch_message=AsyncMock(
+            return_value={
+                "body": {
+                    "attachments": [
+                        _rest_file_attachment(
+                            url="https://example.com/linked.pdf",
+                            token="linked-token",
+                            filename="linked.pdf",
+                        )
+                    ]
+                }
+            }
+        ),
+    )
+
+    msg = MaxMessage(
+        chat_id=42,
+        sender_id=7,
+        text="",
+        message_id="max-file-5",
+        link={
+            "type": "FORWARD",
+            "message": {
+                "id": "linked-1",
+                "attaches": [
+                    {
+                        "_type": "FILE",
+                        "name": "linked.pdf",
+                        "size": 50,
+                        "fileId": 95,
+                        "token": "linked-token",
+                    }
+                ],
+            },
+        },
+    )
+
+    await forward_max_message(
+        msg,
+        client=client,
+        sender=sender,
+        resolver=resolver,
+    )
+
+    client.fetch_message.assert_awaited_once_with("linked-1")
+    client.download_file.assert_awaited_once_with("https://example.com/linked.pdf")
+    sender.send_document.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_forward_max_file_with_existing_url_bypasses_fetch_message():
+    sender = _make_media_sender()
+    resolver = _make_resolver()
+    client = SimpleNamespace(
+        download_file=AsyncMock(return_value=b"file-bytes"),
+        fetch_message=AsyncMock(return_value={}),
+    )
+
+    msg = MaxMessage(
+        chat_id=42,
+        sender_id=7,
+        text="",
+        message_id="max-file-6",
+        attaches=[
+            {
+                "_type": "FILE",
+                "name": "report.pdf",
+                "size": 123,
+                "token": "file-token",
+                "url": "https://example.com/direct.pdf",
+            }
+        ],
+    )
+
+    await forward_max_message(
+        msg,
+        client=client,
+        sender=sender,
+        resolver=resolver,
+    )
+
+    client.fetch_message.assert_not_awaited()
+    client.download_file.assert_awaited_once_with("https://example.com/direct.pdf")
+    sender.send_document.assert_awaited_once()
