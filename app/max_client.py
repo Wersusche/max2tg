@@ -1164,25 +1164,86 @@ class MaxClient:
     async def _resolve_okru_external_video_url(self, page_url: str, html_bytes: bytes) -> str | None:
         video_src = self._extract_okru_video_src(html_bytes)
         if not video_src:
-            log.warning("Failed to extract OK.ru videoSrc from external page %s", page_url[:120])
+            html_text = html_bytes.decode("utf-8", errors="ignore")
+            log.warning(
+                "Failed to extract OK.ru videoSrc from external page %s (has_data_video=%s has_video_src=%s)",
+                page_url[:120],
+                "data-video" in html_text,
+                "videoSrc" in html_text,
+            )
             return None
         return await self._resolve_redirect_url(video_src)
 
     @staticmethod
     def _extract_okru_video_src(html_bytes: bytes) -> str | None:
         html_text = html_bytes.decode("utf-8", errors="ignore")
-        match = re.search(r'data-video=(["\'])(?P<data>.+?)\1', html_text, flags=re.DOTALL)
-        if not match:
-            return None
 
-        try:
-            payload = json.loads(html.unescape(match.group("data")))
-        except Exception:
-            return None
+        for text in (html_text, html.unescape(html_text)):
+            attr_value = MaxClient._extract_html_attribute(text, "data-video")
+            if attr_value:
+                try:
+                    payload = json.loads(html.unescape(attr_value))
+                except Exception:
+                    payload = None
 
-        video_src = payload.get("videoSrc") if isinstance(payload, dict) else None
-        if isinstance(video_src, str) and video_src.startswith("http"):
-            return video_src
+                video_src = payload.get("videoSrc") if isinstance(payload, dict) else None
+                if isinstance(video_src, str) and video_src.startswith("http"):
+                    return video_src
+
+            direct_video_src = MaxClient._search_video_src_in_text(text)
+            if direct_video_src:
+                return direct_video_src
+
+        return None
+
+    @staticmethod
+    def _extract_html_attribute(text: str, attr_name: str) -> str | None:
+        for quote in ('"', "'"):
+            marker = f"{attr_name}={quote}"
+            start = text.find(marker)
+            if start < 0:
+                continue
+
+            index = start + len(marker)
+            value_chars: list[str] = []
+            escaped = False
+            while index < len(text):
+                char = text[index]
+                if char == quote and not escaped:
+                    return "".join(value_chars)
+                if char == "\\" and not escaped:
+                    escaped = True
+                    value_chars.append(char)
+                    index += 1
+                    continue
+                escaped = False
+                value_chars.append(char)
+                index += 1
+
+        return None
+
+    @staticmethod
+    def _search_video_src_in_text(text: str) -> str | None:
+        patterns = (
+            r'"videoSrc"\s*:\s*"(?P<url>(?:\\.|[^"])*)"',
+            r"'videoSrc'\s*:\s*'(?P<url>(?:\\.|[^'])*)'",
+            r'videoSrc\s*:\s*"(?P<url>(?:\\.|[^"])*)"',
+            r'videoSrc\s*:\s*\'(?P<url>(?:\\.|[^\'])*)\'',
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.DOTALL)
+            if not match:
+                continue
+
+            raw_url = match.group("url")
+            try:
+                decoded = json.loads(f'"{raw_url}"')
+            except Exception:
+                decoded = raw_url.replace("\\/", "/")
+
+            if isinstance(decoded, str) and decoded.startswith("http"):
+                return decoded
+
         return None
 
     async def _resolve_redirect_url(self, url: str) -> str | None:
