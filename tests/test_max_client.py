@@ -640,6 +640,47 @@ class TestSendHelpers:
         assert client.download_file_result.await_args_list[2].args == ("https://example.com/redirected.mp4",)
 
     @pytest.mark.asyncio
+    async def test_download_video_attachment_retries_websocket_with_attach_token_after_bad_candidates(self):
+        client = MaxClient(token="auth-token", device_id="dev")
+        client.cmd = AsyncMock(
+            side_effect=[
+                {
+                    "MP4_240": "https://example.com/bad.mp4",
+                    "EXTERNAL": "https://m.ok.ru/video/123",
+                },
+                {
+                    "MP4_720": "https://example.com/good.mp4",
+                },
+            ]
+        )
+        client.download_file_result = AsyncMock(
+            side_effect=[
+                DownloadResult(status=400, used_authorization=False),
+                DownloadResult(data=b"<html>page</html>", status=200, used_authorization=False, content_type="text/html;charset=UTF-8"),
+                DownloadResult(data=b"\x00\x00\x00\x18ftypisomvideo", status=200, used_authorization=False, content_type="video/mp4"),
+            ]
+        )
+        client._resolve_okru_external_video_url = AsyncMock(return_value=None)
+
+        payload = await client.download_video_attachment(
+            video_id=77,
+            chat_id=42,
+            message_id="max-video-token",
+            token="attach-token",
+        )
+
+        assert payload == b"\x00\x00\x00\x18ftypisomvideo"
+        assert client.cmd.await_args_list[0].args == (
+            OpCode.VIDEO_DOWNLOAD_URL,
+            {"videoId": 77, "chatId": 42, "messageId": "max-video-token"},
+        )
+        assert client.cmd.await_args_list[1].args == (
+            OpCode.VIDEO_DOWNLOAD_URL,
+            {"videoId": 77, "chatId": 42, "messageId": "max-video-token", "token": "attach-token"},
+        )
+        assert client.download_file_result.await_args_list[-1].args == ("https://example.com/good.mp4",)
+
+    @pytest.mark.asyncio
     async def test_resolve_okru_external_video_url_uses_mobile_page_player_payload(self):
         client = MaxClient(token="tok", device_id="dev")
         client._extract_okru_metadata = AsyncMock(
