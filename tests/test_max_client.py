@@ -957,6 +957,21 @@ class TestSendHelpers:
         assert "Authorization" not in kwargs["headers"]
 
     @pytest.mark.asyncio
+    async def test_download_file_uses_mobile_headers_for_okru_mobile_page(self):
+        client = MaxClient(token="tok", device_id="dev")
+        session = _FakeSession(_FakeResponse(status=200, body=b"<html></html>", headers={"Content-Type": "text/html"}))
+
+        with patch("app.max_client.aiohttp.ClientSession", return_value=session):
+            result = await client.download_file_result("https://m.ok.ru/video/14261721980814")
+
+        assert result.data == b"<html></html>"
+        _, kwargs = session.calls[0]
+        assert "Authorization" not in kwargs["headers"]
+        assert "Origin" not in kwargs["headers"]
+        assert "Referer" not in kwargs["headers"]
+        assert "Mobile Safari" in kwargs["headers"]["User-Agent"]
+
+    @pytest.mark.asyncio
     async def test_upload_document_uses_file_upload_endpoint_and_data_field(self):
         client = MaxClient(token="tok", device_id="dev")
         client._request_upload_url = AsyncMock(return_value={"url": "https://upload.example/file"})

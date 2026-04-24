@@ -26,6 +26,11 @@ _USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
+_MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Mobile Safari/537.36"
+)
 
 _BROWSER_HEADERS = {
     "User-Agent": _USER_AGENT,
@@ -59,6 +64,16 @@ _SIGNED_MEDIA_HEADERS = {
     "Accept": "*/*",
     "Accept-Language": _BROWSER_HEADERS["Accept-Language"],
     "Accept-Encoding": _BROWSER_HEADERS["Accept-Encoding"],
+}
+_OKRU_PAGE_HEADERS = {
+    "User-Agent": _USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": _BROWSER_HEADERS["Accept-Language"],
+    "Accept-Encoding": _BROWSER_HEADERS["Accept-Encoding"],
+}
+_OKRU_MOBILE_PAGE_HEADERS = {
+    **_OKRU_PAGE_HEADERS,
+    "User-Agent": _MOBILE_USER_AGENT,
 }
 
 _PLATFORM_API_BASE_URL = "https://platform-api.max.ru"
@@ -581,12 +596,38 @@ class MaxClient:
         return _SIGNED_MEDIA_QUERY_KEYS.issubset(query_keys)
 
     def _download_headers(self, url: str, *, use_authorization: bool | None = None) -> tuple[dict[str, str], bool]:
-        headers = dict(_SIGNED_MEDIA_HEADERS if self._is_signed_max_media_url(url) else _HTTP_HEADERS)
+        headers = self._page_headers_for_url(url)
         if use_authorization is None:
             use_authorization = self._is_max_media_url(url)
         if use_authorization:
             headers["Authorization"] = self.token
         return headers, use_authorization
+
+    @classmethod
+    def _page_headers_for_url(cls, url: str) -> dict[str, str]:
+        if cls._is_signed_max_media_url(url):
+            return dict(_SIGNED_MEDIA_HEADERS)
+        if cls._is_okru_page_url(url):
+            host = (urlparse(url).hostname or "").lower().rstrip(".")
+            if host.startswith("m.") or host.startswith("mobile."):
+                return dict(_OKRU_MOBILE_PAGE_HEADERS)
+            return dict(_OKRU_PAGE_HEADERS)
+        return dict(_HTTP_HEADERS)
+
+    @staticmethod
+    def _is_okru_page_url(url: str) -> bool:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if host not in {"ok.ru", "m.ok.ru", "mobile.ok.ru", "www.ok.ru"}:
+            return False
+        path = parsed.path or ""
+        return (
+            path.startswith("/video/")
+            or path.startswith("/videoembed/")
+            or path.startswith("/web-api/video/moviePlayer/")
+            or path.startswith("/live/")
+            or path == "/dk"
+        )
 
     async def _download_file_once(
         self,
@@ -1330,7 +1371,7 @@ class MaxClient:
         try:
             async with session.get(
                 url,
-                headers=headers or dict(_BROWSER_HEADERS),
+                headers=headers or self._page_headers_for_url(url),
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 if resp.status == 200:
