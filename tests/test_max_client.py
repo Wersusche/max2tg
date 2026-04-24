@@ -646,6 +646,13 @@ class TestSendHelpers:
 
         assert MaxClient._extract_okru_video_src(html_bytes) == "https://vid.example/stream"
 
+    def test_extract_okru_video_src_falls_back_to_direct_video_src_pattern(self):
+        html_bytes = (
+            b'<script>window.__STATE__ = {"movie":{"id":1},"videoSrc":"https:\\/\\/vid.example\\/stream.mp4?sig=1"}</script>'
+        )
+
+        assert MaxClient._extract_okru_video_src(html_bytes) == "https://vid.example/stream.mp4?sig=1"
+
     @pytest.mark.asyncio
     async def test_download_file_uses_authorization_for_max_media_urls(self):
         client = MaxClient(token="tok", device_id="dev")
