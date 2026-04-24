@@ -96,6 +96,9 @@ class TestOpCode:
     def test_edit_message(self):
         assert OpCode.EDIT_MESSAGE == 67
 
+    def test_video_download_url(self):
+        assert OpCode.VIDEO_DOWNLOAD_URL == 83
+
     def test_file_download_url(self):
         assert OpCode.FILE_DOWNLOAD_URL == 88
 
@@ -504,6 +507,39 @@ class TestSendHelpers:
         client.cmd = AsyncMock(return_value=client._wrap_cmd_error({"code": "forbidden"}))
 
         payload = await client.fetch_file_download_url(file_id=91, chat_id=42, message_id="max-1")
+
+        assert payload is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_video_download_url_uses_websocket_opcode_and_prefers_highest_mp4(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client.cmd = AsyncMock(
+            return_value={
+                "preview": "https://example.com/preview.jpg",
+                "MP4_720": "https://example.com/video-720.mp4",
+                "MP4_1080": "https://example.com/video-1080.mp4",
+            }
+        )
+
+        payload = await client.fetch_video_download_url(
+            video_id="77",
+            chat_id="42",
+            message_id="max-video-1",
+            token="video-token",
+        )
+
+        assert payload == "https://example.com/video-1080.mp4"
+        client.cmd.assert_awaited_once_with(
+            OpCode.VIDEO_DOWNLOAD_URL,
+            {"videoId": 77, "chatId": 42, "messageId": "max-video-1", "token": "video-token"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_video_download_url_returns_none_for_cmd_error(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client.cmd = AsyncMock(return_value=client._wrap_cmd_error({"code": "forbidden"}))
+
+        payload = await client.fetch_video_download_url(video_id=77, chat_id=42, message_id="max-video-1")
 
         assert payload is None
 
