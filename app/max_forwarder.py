@@ -107,6 +107,14 @@ def _extract_file_id(attach: dict) -> Any:
     return None
 
 
+def _extract_video_id(attach: dict) -> Any:
+    for key in ("videoId", "id"):
+        value = attach.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
 async def _hydrate_file_attach_url(
     attach: dict,
     client: MaxClient,
@@ -148,6 +156,54 @@ async def _hydrate_file_attach_url(
     log.warning(
         "FILE attach fetch_file_download_url(file_id=%s, chat_id=%s, message_id=%s) returned no URL",
         file_id,
+        chat_id,
+        message_id,
+    )
+    return None
+
+
+async def _hydrate_video_attach_url(
+    attach: dict,
+    client: MaxClient,
+    *,
+    chat_id: Any,
+    message_id: str | None,
+) -> str | None:
+    video_id = _extract_video_id(attach)
+    if video_id in (None, ""):
+        log.warning("VIDEO attach missing videoId; cannot hydrate URL")
+        return None
+
+    if chat_id in (None, ""):
+        log.warning("VIDEO attach missing source chat_id for videoId=%s; cannot hydrate URL", video_id)
+        return None
+
+    if not message_id:
+        log.warning("VIDEO attach missing source message_id for videoId=%s; cannot hydrate URL", video_id)
+        return None
+
+    fetch_video_download_url = getattr(client, "fetch_video_download_url", None)
+    if not callable(fetch_video_download_url):
+        log.warning(
+            "VIDEO attach cannot hydrate URL for videoId=%s chat_id=%s message_id=%s: fetch_video_download_url unavailable",
+            video_id,
+            chat_id,
+            message_id,
+        )
+        return None
+
+    url = await fetch_video_download_url(
+        video_id=video_id,
+        chat_id=chat_id,
+        message_id=message_id,
+        token=attach.get("token"),
+    )
+    if isinstance(url, str) and url.startswith("http"):
+        return url
+
+    log.warning(
+        "VIDEO attach fetch_video_download_url(video_id=%s, chat_id=%s, message_id=%s) returned no URL",
+        video_id,
         chat_id,
         message_id,
     )
@@ -251,6 +307,27 @@ async def _send_attach(
         )
 
     if atype == "VIDEO":
+        video_url = await _hydrate_video_attach_url(
+            attach,
+            client,
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+        if not video_url:
+            video_url = _extract_attach_url(attach)
+        if video_url:
+            data = await client.download_file(video_url)
+            if data:
+                video_id = _extract_video_id(attach)
+                filename = attach.get("name") or (f"video-{video_id}.mp4" if video_id not in (None, "") else "video.mp4")
+                return await sender.send_video(
+                    data,
+                    caption=header_text,
+                    filename=filename,
+                    message_thread_id=message_thread_id,
+                    reply_to_message_id=reply_to_message_id,
+                    raise_bad_request=raise_bad_request,
+                )
         thumb = attach.get("thumbnail")
         thumb_url = _first_http_url(thumb)
         if thumb_url:

@@ -387,6 +387,51 @@ async def test_forward_max_file_routes_image_extension_to_photo():
 
 
 @pytest.mark.asyncio
+async def test_forward_max_video_hydrates_video_from_websocket_lookup():
+    sender = _make_media_sender()
+    resolver = _make_resolver()
+    client = SimpleNamespace(
+        download_file=AsyncMock(return_value=b"video-bytes"),
+        fetch_video_download_url=AsyncMock(return_value="https://example.com/video-1080.mp4"),
+    )
+
+    msg = MaxMessage(
+        chat_id=42,
+        sender_id=7,
+        text="",
+        message_id="max-video-1",
+        attaches=[
+            {
+                "_type": "VIDEO",
+                "videoId": 77,
+                "token": "video-token",
+                "thumbnail": {"url": "https://example.com/preview.jpg"},
+            }
+        ],
+    )
+
+    await forward_max_message(
+        msg,
+        client=client,
+        sender=sender,
+        resolver=resolver,
+    )
+
+    client.fetch_video_download_url.assert_awaited_once_with(
+        video_id=77,
+        chat_id=42,
+        message_id="max-video-1",
+        token="video-token",
+    )
+    client.download_file.assert_awaited_once_with("https://example.com/video-1080.mp4")
+    sender.send_video.assert_awaited_once()
+    assert sender.send_video.await_args.args[0] == b"video-bytes"
+    assert sender.send_video.await_args.kwargs["filename"] == "video-77.mp4"
+    sender.send_photo.assert_not_awaited()
+    assert sender.send.await_count == 0
+
+
+@pytest.mark.asyncio
 async def test_forward_max_file_falls_back_to_text_when_file_lookup_has_no_url():
     sender = _make_media_sender(send_message_id=7201)
     resolver = _make_resolver()
