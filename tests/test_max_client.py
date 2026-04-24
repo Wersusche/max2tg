@@ -611,6 +611,42 @@ class TestSendHelpers:
         assert client.download_file_result.await_args_list[1].args == ("https://example.com/good",)
 
     @pytest.mark.asyncio
+    async def test_download_video_attachment_resolves_okru_external_html_to_video(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client.cmd = AsyncMock(
+            return_value={
+                "MP4_240": "https://example.com/bad.mp4",
+                "EXTERNAL": "https://m.ok.ru/video/123",
+            }
+        )
+        client.download_file_result = AsyncMock(
+            side_effect=[
+                DownloadResult(status=400, used_authorization=False),
+                DownloadResult(data=b"<html>page</html>", status=200, used_authorization=False, content_type="text/html;charset=UTF-8"),
+                DownloadResult(data=b"\x00\x00\x00\x18ftypisomvideo", status=200, used_authorization=False, content_type="video/mp4"),
+            ]
+        )
+        client._resolve_okru_external_video_url = AsyncMock(return_value="https://example.com/redirected.mp4")
+
+        payload = await client.download_video_attachment(
+            video_id=77,
+            chat_id=42,
+            message_id="max-video-4",
+            token="attach-token",
+        )
+
+        assert payload == b"\x00\x00\x00\x18ftypisomvideo"
+        client._resolve_okru_external_video_url.assert_awaited_once_with("https://m.ok.ru/video/123", b"<html>page</html>")
+        assert client.download_file_result.await_args_list[2].args == ("https://example.com/redirected.mp4",)
+
+    def test_extract_okru_video_src_parses_data_video_json(self):
+        html_bytes = (
+            b'<div data-video=\"{&quot;videoSrc&quot;:&quot;https://vid.example/stream&quot;,&quot;videoName&quot;:&quot;test&quot;}\"></div>'
+        )
+
+        assert MaxClient._extract_okru_video_src(html_bytes) == "https://vid.example/stream"
+
+    @pytest.mark.asyncio
     async def test_download_file_uses_authorization_for_max_media_urls(self):
         client = MaxClient(token="tok", device_id="dev")
         session = _FakeSession(_FakeResponse(status=200, body=b"voice-bytes"))

@@ -1,9 +1,11 @@
 import asyncio
+import html
 import json
 import logging
 import mimetypes
 import os
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -881,6 +883,28 @@ class MaxClient:
                 )
                 return result.data
             if result.data is not None:
+                if self._is_okru_video_page_download(url, result):
+                    resolved_url = await self._resolve_okru_external_video_url(url, result.data)
+                    if resolved_url:
+                        redirected_result = await self.download_file_result(resolved_url)
+                        if self._is_video_download_result(redirected_result):
+                            log.info(
+                                "Downloaded playable external video candidate=%d video_id=%s redirected_url=%s content_type=%s bytes=%d",
+                                index,
+                                video_id,
+                                resolved_url[:120],
+                                redirected_result.content_type,
+                                len(redirected_result.data or b""),
+                            )
+                            return redirected_result.data
+                        if redirected_result.data is not None:
+                            log.warning(
+                                "External video redirect for candidate=%d video_id=%s returned non-video payload content_type=%s bytes=%d",
+                                index,
+                                video_id,
+                                redirected_result.content_type,
+                                len(redirected_result.data),
+                            )
                 log.warning(
                     "Video candidate=%d for video_id=%s downloaded non-video payload content_type=%s bytes=%d",
                     index,
@@ -1130,6 +1154,67 @@ class MaxClient:
     def _extract_video_http_url(payload: Any) -> str | None:
         urls = MaxClient._extract_video_http_urls(payload)
         return urls[0] if urls else None
+
+    @staticmethod
+    def _is_okru_video_page_download(url: str, result: DownloadResult) -> bool:
+        content_type = (result.content_type or "").split(";", 1)[0].strip().lower()
+        host = (urlparse(url).hostname or "").lower().rstrip(".")
+        return content_type == "text/html" and (host == "ok.ru" or host.endswith(".ok.ru"))
+
+    async def _resolve_okru_external_video_url(self, page_url: str, html_bytes: bytes) -> str | None:
+        video_src = self._extract_okru_video_src(html_bytes)
+        if not video_src:
+            log.warning("Failed to extract OK.ru videoSrc from external page %s", page_url[:120])
+            return None
+        return await self._resolve_redirect_url(video_src)
+
+    @staticmethod
+    def _extract_okru_video_src(html_bytes: bytes) -> str | None:
+        html_text = html_bytes.decode("utf-8", errors="ignore")
+        match = re.search(r'data-video=(["\'])(?P<data>.+?)\1', html_text, flags=re.DOTALL)
+        if not match:
+            return None
+
+        try:
+            payload = json.loads(html.unescape(match.group("data")))
+        except Exception:
+            return None
+
+        video_src = payload.get("videoSrc") if isinstance(payload, dict) else None
+        if isinstance(video_src, str) and video_src.startswith("http"):
+            return video_src
+        return None
+
+    async def _resolve_redirect_url(self, url: str) -> str | None:
+        headers = dict(_SIGNED_MEDIA_HEADERS)
+        session = aiohttp.ClientSession()
+        try:
+            try:
+                async with session.head(
+                    url,
+                    headers=headers,
+                    allow_redirects=True,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status < 400 and str(resp.url).startswith("http"):
+                        return str(resp.url)
+            except Exception:
+                log.debug("HEAD redirect resolution failed for %s", url[:120], exc_info=True)
+
+            try:
+                async with session.get(
+                    url,
+                    headers=headers,
+                    allow_redirects=True,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status < 400 and str(resp.url).startswith("http"):
+                        return str(resp.url)
+            except Exception:
+                log.debug("GET redirect resolution failed for %s", url[:120], exc_info=True)
+        finally:
+            await session.close()
+        return None
 
     @staticmethod
     def _is_video_download_result(result: DownloadResult) -> bool:
