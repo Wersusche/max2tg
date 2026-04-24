@@ -772,34 +772,15 @@ class MaxClient:
             )
             return []
 
-        request_payloads: list[dict[str, Any]] = [
-            {
-                "videoId": normalized_video_id,
-                "chatId": normalized_chat_id,
-                "messageId": str(message_id),
-            }
-        ]
-        if isinstance(token, str) and token:
-            request_payloads.append(
-                {
-                    "videoId": normalized_video_id,
-                    "chatId": normalized_chat_id,
-                    "messageId": str(message_id),
-                    "token": token,
-                }
-            )
-        request_payloads.append({"videoId": normalized_video_id, "token": self.token})
-        request_payloads.append({"videoId": normalized_video_id})
-
-        seen_payloads: set[tuple[tuple[str, Any], ...]] = set()
+        request_payloads = self._build_video_download_request_payloads(
+            video_id=normalized_video_id,
+            chat_id=normalized_chat_id,
+            message_id=str(message_id),
+            token=token,
+        )
         last_payload_preview: Any = None
 
         for index, request_payload in enumerate(request_payloads, start=1):
-            payload_key = tuple(sorted(request_payload.items()))
-            if payload_key in seen_payloads:
-                continue
-            seen_payloads.add(payload_key)
-
             response_payload = await self.cmd(OpCode.VIDEO_DOWNLOAD_URL, request_payload)
             cmd_error = self._extract_cmd_error(response_payload)
             if cmd_error is not None:
@@ -865,54 +846,146 @@ class MaxClient:
         message_id: str,
         token: str | None = None,
     ) -> bytes | None:
-        urls = await self.fetch_video_download_urls(
-            video_id=video_id,
-            chat_id=chat_id,
-            message_id=message_id,
+        if video_id in (None, "") or chat_id in (None, "") or not message_id:
+            return None
+
+        try:
+            normalized_video_id = int(video_id)
+            normalized_chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            log.warning(
+                "Download video attachment skipped due to invalid identifiers: video_id=%r chat_id=%r message_id=%r",
+                video_id,
+                chat_id,
+                message_id,
+            )
+            return None
+
+        request_payloads = self._build_video_download_request_payloads(
+            video_id=normalized_video_id,
+            chat_id=normalized_chat_id,
+            message_id=str(message_id),
             token=token,
         )
-        for index, url in enumerate(urls, start=1):
-            result = await self.download_file_result(url)
-            if self._is_video_download_result(result):
-                log.info(
-                    "Downloaded playable video candidate=%d video_id=%s content_type=%s bytes=%d",
-                    index,
-                    video_id,
-                    result.content_type,
-                    len(result.data or b""),
-                )
-                return result.data
-            if result.data is not None:
-                if self._is_okru_video_page_download(url, result):
-                    resolved_url = await self._resolve_okru_external_video_url(url, result.data)
-                    if resolved_url:
-                        redirected_result = await self.download_file_result(resolved_url)
-                        if self._is_video_download_result(redirected_result):
-                            log.info(
-                                "Downloaded playable external video candidate=%d video_id=%s redirected_url=%s content_type=%s bytes=%d",
-                                index,
-                                video_id,
-                                resolved_url[:120],
-                                redirected_result.content_type,
-                                len(redirected_result.data or b""),
-                            )
-                            return redirected_result.data
-                        if redirected_result.data is not None:
-                            log.warning(
-                                "External video redirect for candidate=%d video_id=%s returned non-video payload content_type=%s bytes=%d",
-                                index,
-                                video_id,
-                                redirected_result.content_type,
-                                len(redirected_result.data),
-                            )
+        seen_urls: set[str] = set()
+        candidate_index = 0
+
+        for attempt_index, request_payload in enumerate(request_payloads, start=1):
+            response_payload = await self.cmd(OpCode.VIDEO_DOWNLOAD_URL, request_payload)
+            cmd_error = self._extract_cmd_error(response_payload)
+            if cmd_error is not None:
                 log.warning(
-                    "Video candidate=%d for video_id=%s downloaded non-video payload content_type=%s bytes=%d",
-                    index,
-                    video_id,
-                    result.content_type,
-                    len(result.data),
+                    "Download video attachment URL attempt=%d failed video_id=%s chat_id=%s message_id=%s: %s",
+                    attempt_index,
+                    normalized_video_id,
+                    normalized_chat_id,
+                    message_id,
+                    cmd_error,
                 )
+                continue
+
+            attempt_urls = []
+            for url in self._extract_video_http_urls(response_payload):
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                attempt_urls.append(url)
+
+            if attempt_urls:
+                log.info(
+                    "Trying %d fresh video URL(s) from websocket attempt=%d video_id=%s keys=%s",
+                    len(attempt_urls),
+                    attempt_index,
+                    normalized_video_id,
+                    list(response_payload.keys()) if isinstance(response_payload, dict) else type(response_payload).__name__,
+                )
+            else:
+                log.info(
+                    "Video attachment websocket attempt=%d yielded no fresh URL candidates for video_id=%s",
+                    attempt_index,
+                    normalized_video_id,
+                )
+
+            for url in attempt_urls:
+                candidate_index += 1
+                result = await self.download_file_result(url)
+                if self._is_video_download_result(result):
+                    log.info(
+                        "Downloaded playable video candidate=%d video_id=%s content_type=%s bytes=%d",
+                        candidate_index,
+                        video_id,
+                        result.content_type,
+                        len(result.data or b""),
+                    )
+                    return result.data
+                if result.data is not None:
+                    if self._is_okru_video_page_download(url, result):
+                        resolved_url = await self._resolve_okru_external_video_url(url, result.data)
+                        if resolved_url:
+                            redirected_result = await self.download_file_result(resolved_url)
+                            if self._is_video_download_result(redirected_result):
+                                log.info(
+                                    "Downloaded playable external video candidate=%d video_id=%s redirected_url=%s content_type=%s bytes=%d",
+                                    candidate_index,
+                                    video_id,
+                                    resolved_url[:120],
+                                    redirected_result.content_type,
+                                    len(redirected_result.data or b""),
+                                )
+                                return redirected_result.data
+                            if redirected_result.data is not None:
+                                log.warning(
+                                    "External video redirect for candidate=%d video_id=%s returned non-video payload content_type=%s bytes=%d",
+                                    candidate_index,
+                                    video_id,
+                                    redirected_result.content_type,
+                                    len(redirected_result.data),
+                                )
+                    log.warning(
+                        "Video candidate=%d for video_id=%s downloaded non-video payload content_type=%s bytes=%d",
+                        candidate_index,
+                        video_id,
+                        result.content_type,
+                        len(result.data),
+                    )
         return None
+
+    def _build_video_download_request_payloads(
+        self,
+        *,
+        video_id: int,
+        chat_id: int,
+        message_id: str,
+        token: str | None = None,
+    ) -> list[dict[str, Any]]:
+        request_payloads: list[dict[str, Any]] = [
+            {
+                "videoId": video_id,
+                "chatId": chat_id,
+                "messageId": message_id,
+            }
+        ]
+        if isinstance(token, str) and token:
+            request_payloads.append(
+                {
+                    "videoId": video_id,
+                    "chatId": chat_id,
+                    "messageId": message_id,
+                    "token": token,
+                }
+            )
+        request_payloads.append({"videoId": video_id, "token": self.token})
+        request_payloads.append({"videoId": video_id})
+
+        unique_payloads: list[dict[str, Any]] = []
+        seen_payloads: set[tuple[tuple[str, Any], ...]] = set()
+        for request_payload in request_payloads:
+            payload_key = tuple(sorted(request_payload.items()))
+            if payload_key in seen_payloads:
+                continue
+            seen_payloads.add(payload_key)
+            unique_payloads.append(request_payload)
+        return unique_payloads
 
     async def download_file_result(self, url: str) -> DownloadResult:
         """Download a file by URL, returning payload and response metadata."""
