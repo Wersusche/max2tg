@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.max_client import DownloadResult, MaxMessage
-from app.max_forwarder import forward_max_message
+from app.max_client import DownloadResult, MaxMessage, VideoDownloadOutcome
+from app.max_forwarder import VIDEO_WS_UNAVAILABLE_CAPTION, forward_max_message
 from app.message_store import MessageStore
 from app.resolver import ContactResolver
 
@@ -391,7 +391,7 @@ async def test_forward_max_video_hydrates_video_from_websocket_lookup():
     sender = _make_media_sender()
     resolver = _make_resolver()
     client = SimpleNamespace(
-        download_video_attachment=AsyncMock(return_value=b"video-bytes"),
+        resolve_video_attachment=AsyncMock(return_value=VideoDownloadOutcome(video_bytes=b"video-bytes")),
         download_file=AsyncMock(return_value=b"unused"),
     )
 
@@ -417,17 +417,63 @@ async def test_forward_max_video_hydrates_video_from_websocket_lookup():
         resolver=resolver,
     )
 
-    client.download_video_attachment.assert_awaited_once_with(
+    client.resolve_video_attachment.assert_awaited_once_with(
         video_id=77,
         chat_id=42,
         message_id="max-video-1",
         token="video-token",
+        preview_url="https://example.com/preview.jpg",
     )
     sender.send_video.assert_awaited_once()
     assert sender.send_video.await_args.args[0] == b"video-bytes"
     assert sender.send_video.await_args.kwargs["filename"] == "video-77.mp4"
     sender.send_photo.assert_not_awaited()
     assert sender.send.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_forward_max_video_sends_preview_with_websocket_unavailable_caption():
+    sender = _make_media_sender()
+    resolver = _make_resolver()
+    client = SimpleNamespace(
+        resolve_video_attachment=AsyncMock(
+            return_value=VideoDownloadOutcome(
+                failure_reason="ws_signed_mp4_400",
+                preview_bytes=b"preview-bytes",
+                preview_url="https://example.com/preview.jpg",
+            )
+        ),
+        download_file=AsyncMock(return_value=b"unused"),
+    )
+
+    msg = MaxMessage(
+        chat_id=42,
+        sender_id=7,
+        text="",
+        message_id="max-video-fallback",
+        attaches=[
+            {
+                "_type": "VIDEO",
+                "videoId": 78,
+                "token": "video-token",
+                "thumbnail": {"url": "https://example.com/preview.jpg"},
+            }
+        ],
+    )
+
+    await forward_max_message(
+        msg,
+        client=client,
+        sender=sender,
+        resolver=resolver,
+    )
+
+    sender.send_video.assert_not_awaited()
+    sender.send.assert_not_awaited()
+    sender.send_photo.assert_awaited_once()
+    assert sender.send_photo.await_args.args[0] == b"preview-bytes"
+    assert VIDEO_WS_UNAVAILABLE_CAPTION in sender.send_photo.await_args.kwargs["caption"]
+    client.download_file.assert_not_awaited()
 
 
 @pytest.mark.asyncio
