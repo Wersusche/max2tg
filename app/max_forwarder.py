@@ -99,121 +99,77 @@ def _guess_media_kind(filename: str) -> str:
     return "document"
 
 
-def _extract_rest_message_attachments(payload: Any) -> list[dict]:
-    if not isinstance(payload, dict):
-        return []
-
-    body = payload.get("body")
-    if isinstance(body, dict):
-        attachments = body.get("attachments")
-        if isinstance(attachments, list):
-            return [attach for attach in attachments if isinstance(attach, dict)]
-
-    message = payload.get("message")
-    if isinstance(message, dict):
-        nested_body = message.get("body")
-        if isinstance(nested_body, dict):
-            attachments = nested_body.get("attachments")
-            if isinstance(attachments, list):
-                return [attach for attach in attachments if isinstance(attach, dict)]
-
-    return []
-
-
-def _extract_rest_file_token(attach: dict) -> str | None:
-    payload = attach.get("payload")
-    if not isinstance(payload, dict):
-        return None
-    token = payload.get("token")
-    if isinstance(token, str) and token:
-        return token
-    return None
-
-
-def _extract_rest_file_url(attach: dict) -> str | None:
-    payload = attach.get("payload")
-    if not isinstance(payload, dict):
-        return None
-    url = payload.get("url")
-    if isinstance(url, str) and url.startswith("http"):
-        return url
-    return None
-
-
-def _extract_rest_file_name(attach: dict) -> str | None:
-    for key in ("filename", "name", "title"):
+def _extract_file_id(attach: dict) -> Any:
+    for key in ("fileId", "id"):
         value = attach.get(key)
-        if isinstance(value, str) and value:
+        if value not in (None, ""):
             return value
     return None
 
 
-def _extract_rest_file_attachments(payload: Any) -> list[dict]:
-    return [
-        attach
-        for attach in _extract_rest_message_attachments(payload)
-        if str(attach.get("type", "")).lower() == "file"
-    ]
-
-
-def _match_rest_file_attachment(rest_attachments: list[dict], incoming_attach: dict) -> dict | None:
-    incoming_token = incoming_attach.get("token") or incoming_attach.get("fileToken")
-    if isinstance(incoming_token, str) and incoming_token:
-        for rest_attach in rest_attachments:
-            if _extract_rest_file_token(rest_attach) == incoming_token:
-                return rest_attach
-
-    incoming_name = incoming_attach.get("name")
-    if isinstance(incoming_name, str) and incoming_name:
-        incoming_name_folded = incoming_name.casefold()
-        for rest_attach in rest_attachments:
-            rest_name = _extract_rest_file_name(rest_attach)
-            if isinstance(rest_name, str) and rest_name.casefold() == incoming_name_folded:
-                return rest_attach
-
-    if len(rest_attachments) == 1:
-        return rest_attachments[0]
-
-    return None
-
-
-async def _hydrate_file_attach(
+async def _hydrate_file_attach_url(
     attach: dict,
     client: MaxClient,
     *,
+    chat_id: Any,
     message_id: str | None,
-) -> dict | None:
+) -> str | None:
+    file_id = _extract_file_id(attach)
+    if file_id in (None, ""):
+        log.warning("FILE attach missing fileId; cannot hydrate URL")
+        return None
+
+    if chat_id in (None, ""):
+        log.warning("FILE attach missing source chat_id for fileId=%s; cannot hydrate URL", file_id)
+        return None
+
     if not message_id:
-        log.warning("FILE attach missing source message_id; cannot hydrate URL")
+        log.warning("FILE attach missing source message_id for fileId=%s; cannot hydrate URL", file_id)
         return None
 
-    fetch_message = getattr(client, "fetch_message", None)
-    if not callable(fetch_message):
-        log.warning("FILE attach cannot hydrate URL for message_id=%s: fetch_message unavailable", message_id)
-        return None
-
-    fetched_message = await fetch_message(message_id)
-    rest_attachments = _extract_rest_file_attachments(fetched_message)
-    if not rest_attachments:
-        log.warning("FILE attach fetch_message(message_id=%s) returned no usable attachment", message_id)
-        return None
-
-    matched_attach = _match_rest_file_attachment(rest_attachments, attach)
-    if matched_attach is None:
+    fetch_file_download_url = getattr(client, "fetch_file_download_url", None)
+    if not callable(fetch_file_download_url):
         log.warning(
-            "FILE attach token/filename match failed for message_id=%s token=%r name=%r candidates=%d",
+            "FILE attach cannot hydrate URL for fileId=%s chat_id=%s message_id=%s: fetch_file_download_url unavailable",
+            file_id,
+            chat_id,
             message_id,
-            attach.get("token") or attach.get("fileToken"),
-            attach.get("name"),
-            len(rest_attachments),
         )
         return None
 
-    if _extract_rest_file_url(matched_attach) is None:
-        log.warning("FILE attach for message_id=%s matched fetched attachment without payload.url", message_id)
-        return None
+    url = await fetch_file_download_url(
+        file_id=file_id,
+        chat_id=chat_id,
+        message_id=message_id,
+    )
+    if isinstance(url, str) and url.startswith("http"):
+        return url
 
-    return matched_attach
+    log.warning(
+        "FILE attach fetch_file_download_url(file_id=%s, chat_id=%s, message_id=%s) returned no URL",
+        file_id,
+        chat_id,
+        message_id,
+    )
+    return None
+
+
+def _extract_linked_max_chat_id(link: dict, *, default: Any = None) -> Any:
+    inner = link.get("message") or {}
+    inner_chat = inner.get("chat") if isinstance(inner.get("chat"), dict) else {}
+    outer_chat = link.get("chat") if isinstance(link.get("chat"), dict) else {}
+
+    for candidate in (
+        inner.get("chatId"),
+        inner.get("chat_id"),
+        inner_chat.get("id"),
+        link.get("chatId"),
+        link.get("chat_id"),
+        outer_chat.get("id"),
+    ):
+        if candidate is not None and str(candidate):
+            return candidate
+    return default
 
 
 async def _send_downloaded_file(
@@ -261,6 +217,7 @@ async def _send_attach(
     sender: Any,
     header_text: str,
     *,
+    chat_id: Any = None,
     message_id: str | None = None,
     message_thread_id: int | None = None,
     reply_to_message_id: int | None = None,
@@ -318,16 +275,12 @@ async def _send_attach(
         size = attach.get("size", 0)
         token_url = _extract_attach_url(attach) or _extract_file_url(attach)
         if not token_url:
-            hydrated_attach = await _hydrate_file_attach(
+            token_url = await _hydrate_file_attach_url(
                 attach,
                 client,
+                chat_id=chat_id,
                 message_id=message_id,
             )
-            if hydrated_attach is not None:
-                token_url = _extract_rest_file_url(hydrated_attach)
-                hydrated_name = _extract_rest_file_name(hydrated_attach)
-                if hydrated_name:
-                    name = hydrated_name
         if token_url:
             data = await client.download_file(token_url)
             if data:
@@ -449,11 +402,13 @@ async def _handle_linked_message(
     sender: Any,
     resolver: ContactResolver,
     *,
+    source_chat_id: Any = None,
     message_thread_id: int | None = None,
     raise_bad_request: bool = False,
 ) -> int | None:
     inner = link.get("message") or link
     linked_message_id = _extract_linked_max_message_id(link)
+    linked_chat_id = _extract_linked_max_chat_id(link, default=source_chat_id)
     fwd_sender_id = inner.get("sender") or link.get("sender")
     fwd_text = inner.get("text", "") or link.get("text", "")
     fwd_attaches = inner.get("attaches") or link.get("attaches") or []
@@ -493,6 +448,7 @@ async def _handle_linked_message(
                 client,
                 sender,
                 cap,
+                chat_id=linked_chat_id,
                 message_id=linked_message_id,
                 message_thread_id=message_thread_id,
                 raise_bad_request=raise_bad_request,
@@ -686,6 +642,7 @@ async def _send_current_message_content(
                 client,
                 sender,
                 cap,
+                chat_id=msg.chat_id,
                 message_id=msg.message_id or None,
                 message_thread_id=message_thread_id,
                 reply_to_message_id=reply_to_message_id,
@@ -782,6 +739,7 @@ async def forward_max_message(
                 client,
                 dispatch_sender,
                 resolver,
+                source_chat_id=msg.chat_id,
                 message_thread_id=message_thread_id,
                 raise_bad_request=raise_topic_errors,
             )
@@ -808,6 +766,7 @@ async def forward_max_message(
                 client,
                 dispatch_sender,
                 resolver,
+                source_chat_id=msg.chat_id,
                 message_thread_id=message_thread_id,
                 raise_bad_request=raise_topic_errors,
             )

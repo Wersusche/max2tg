@@ -96,6 +96,9 @@ class TestOpCode:
     def test_edit_message(self):
         assert OpCode.EDIT_MESSAGE == 67
 
+    def test_file_download_url(self):
+        assert OpCode.FILE_DOWNLOAD_URL == 88
+
     def test_dispatch(self):
         assert OpCode.DISPATCH == 128
 
@@ -481,6 +484,28 @@ class TestSendHelpers:
         assert url.endswith("/messages/max-1")
         assert kwargs["headers"]["Authorization"] == "tok"
         assert kwargs["headers"]["Accept"] == "application/json"
+
+    @pytest.mark.asyncio
+    async def test_fetch_file_download_url_uses_websocket_opcode_and_payload(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client.cmd = AsyncMock(return_value={"url": "https://example.com/report.pdf"})
+
+        payload = await client.fetch_file_download_url(file_id="91", chat_id="42", message_id="max-1")
+
+        assert payload == "https://example.com/report.pdf"
+        client.cmd.assert_awaited_once_with(
+            OpCode.FILE_DOWNLOAD_URL,
+            {"fileId": 91, "chatId": 42, "messageId": "max-1"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_file_download_url_returns_none_for_cmd_error(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client.cmd = AsyncMock(return_value=client._wrap_cmd_error({"code": "forbidden"}))
+
+        payload = await client.fetch_file_download_url(file_id=91, chat_id=42, message_id="max-1")
+
+        assert payload is None
 
     @pytest.mark.asyncio
     async def test_download_file_uses_authorization_for_max_media_urls(self):
