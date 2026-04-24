@@ -43,27 +43,6 @@ def _make_media_sender(*, send_message_id: int = 7001, voice_message_id: int = 7
     )
 
 
-def _rest_file_attachment(
-    *,
-    url: str | None,
-    token: str | None,
-    filename: str,
-    size: int = 0,
-):
-    payload = {}
-    if url is not None:
-        payload["url"] = url
-    if token is not None:
-        payload["token"] = token
-
-    return {
-        "type": "file",
-        "payload": payload,
-        "filename": filename,
-        "size": size,
-    }
-
-
 @pytest.mark.asyncio
 async def test_forward_max_message_skips_duplicate_max_message_id(tmp_path):
     sender = _make_sender(message_ids=[7001, 7002])
@@ -103,7 +82,7 @@ async def test_forward_max_audio_sends_voice_when_download_retry_succeeds(tmp_pa
     resolver = _make_resolver()
     client = SimpleNamespace(
         download_file_result=AsyncMock(return_value=DownloadResult(data=b"voice-bytes", status=200, used_authorization=False)),
-        fetch_message=AsyncMock(),
+        fetch_file_download_url=AsyncMock(),
         download_file=AsyncMock(return_value=None),
     )
     store = MessageStore(str(tmp_path / "messages.sqlite3"))
@@ -133,7 +112,7 @@ async def test_forward_max_audio_sends_voice_when_download_retry_succeeds(tmp_pa
         )
 
         client.download_file_result.assert_awaited_once_with("https://media.okcdn.ru/stale.ogg?expires=1&sig=abc")
-        client.fetch_message.assert_not_awaited()
+        client.fetch_file_download_url.assert_not_awaited()
         assert sender.send_voice.await_count == 1
         assert sender.send_voice.await_args.args[0] == b"voice-bytes"
         assert sender.send.await_count == 0
@@ -147,7 +126,7 @@ async def test_forward_max_audio_falls_back_to_text_when_download_retry_fails(tm
     resolver = _make_resolver()
     client = SimpleNamespace(
         download_file_result=AsyncMock(return_value=DownloadResult(status=403, used_authorization=False)),
-        fetch_message=AsyncMock(),
+        fetch_file_download_url=AsyncMock(),
         download_file=AsyncMock(return_value=None),
     )
     store = MessageStore(str(tmp_path / "messages.sqlite3"))
@@ -177,7 +156,7 @@ async def test_forward_max_audio_falls_back_to_text_when_download_retry_fails(tm
         )
 
         client.download_file_result.assert_awaited_once_with("https://media.okcdn.ru/stale-fail.ogg?expires=1&sig=abc")
-        client.fetch_message.assert_not_awaited()
+        client.fetch_file_download_url.assert_not_awaited()
         assert sender.send_voice.await_count == 0
         assert sender.send.await_count == 1
         assert "[аудио]" in sender.send.await_args.args[0]
@@ -322,25 +301,12 @@ async def test_forward_max_message_uses_display_name_after_string_contact_resolu
 
 
 @pytest.mark.asyncio
-async def test_forward_max_file_hydrates_document_from_fetched_message():
+async def test_forward_max_file_hydrates_document_from_file_lookup():
     sender = _make_media_sender()
     resolver = _make_resolver()
     client = SimpleNamespace(
         download_file=AsyncMock(return_value=b"file-bytes"),
-        fetch_message=AsyncMock(
-            return_value={
-                "body": {
-                    "attachments": [
-                        _rest_file_attachment(
-                            url="https://example.com/report.pdf",
-                            token="file-token",
-                            filename="report.pdf",
-                            size=123,
-                        )
-                    ]
-                }
-            }
-        ),
+        fetch_file_download_url=AsyncMock(return_value="https://example.com/report.pdf"),
     )
 
     msg = MaxMessage(
@@ -366,7 +332,11 @@ async def test_forward_max_file_hydrates_document_from_fetched_message():
         resolver=resolver,
     )
 
-    client.fetch_message.assert_awaited_once_with("max-file-1")
+    client.fetch_file_download_url.assert_awaited_once_with(
+        file_id=91,
+        chat_id=42,
+        message_id="max-file-1",
+    )
     client.download_file.assert_awaited_once_with("https://example.com/report.pdf")
     sender.send_document.assert_awaited_once()
     assert sender.send_document.await_args.args[0] == b"file-bytes"
@@ -375,43 +345,25 @@ async def test_forward_max_file_hydrates_document_from_fetched_message():
 
 
 @pytest.mark.asyncio
-async def test_forward_max_file_prefers_token_match_over_filename_match():
+async def test_forward_max_file_routes_image_extension_to_photo():
     sender = _make_media_sender()
     resolver = _make_resolver()
     client = SimpleNamespace(
         download_file=AsyncMock(return_value=b"file-bytes"),
-        fetch_message=AsyncMock(
-            return_value={
-                "body": {
-                    "attachments": [
-                        _rest_file_attachment(
-                            url="https://example.com/by-name.pdf",
-                            token="other-token",
-                            filename="report.pdf",
-                        ),
-                        _rest_file_attachment(
-                            url="https://example.com/by-token.pdf",
-                            token="wanted-token",
-                            filename="token-wins.pdf",
-                        ),
-                    ]
-                }
-            }
-        ),
+        fetch_file_download_url=AsyncMock(return_value="https://example.com/picture.png"),
     )
 
     msg = MaxMessage(
         chat_id=42,
         sender_id=7,
         text="",
-        message_id="max-file-2",
+        message_id="max-file-photo",
         attaches=[
             {
                 "_type": "FILE",
-                "name": "report.pdf",
+                "name": "picture.png",
                 "size": 100,
                 "fileId": 92,
-                "token": "wanted-token",
             }
         ],
     )
@@ -423,84 +375,24 @@ async def test_forward_max_file_prefers_token_match_over_filename_match():
         resolver=resolver,
     )
 
-    client.download_file.assert_awaited_once_with("https://example.com/by-token.pdf")
-    assert sender.send_document.await_args.kwargs["filename"] == "token-wins.pdf"
-
-
-@pytest.mark.asyncio
-async def test_forward_max_file_uses_filename_match_when_token_missing():
-    sender = _make_media_sender()
-    resolver = _make_resolver()
-    client = SimpleNamespace(
-        download_file=AsyncMock(return_value=b"file-bytes"),
-        fetch_message=AsyncMock(
-            return_value={
-                "message": {
-                    "body": {
-                        "attachments": [
-                            _rest_file_attachment(
-                                url="https://example.com/other.pdf",
-                                token="other-token",
-                                filename="other.pdf",
-                            ),
-                            _rest_file_attachment(
-                                url="https://example.com/by-filename.pdf",
-                                token="filename-token",
-                                filename="report.pdf",
-                            ),
-                        ]
-                    }
-                }
-            }
-        ),
-    )
-
-    msg = MaxMessage(
+    client.fetch_file_download_url.assert_awaited_once_with(
+        file_id=92,
         chat_id=42,
-        sender_id=7,
-        text="",
-        message_id="max-file-3",
-        attaches=[
-            {
-                "_type": "FILE",
-                "name": "report.pdf",
-                "size": 100,
-                "fileId": 93,
-            }
-        ],
+        message_id="max-file-photo",
     )
-
-    await forward_max_message(
-        msg,
-        client=client,
-        sender=sender,
-        resolver=resolver,
-    )
-
-    client.download_file.assert_awaited_once_with("https://example.com/by-filename.pdf")
-    assert sender.send_document.await_args.kwargs["filename"] == "report.pdf"
+    client.download_file.assert_awaited_once_with("https://example.com/picture.png")
+    sender.send_photo.assert_awaited_once()
+    assert sender.send_photo.await_args.kwargs["filename"] == "picture.png"
+    sender.send_document.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_forward_max_file_falls_back_to_text_when_fetched_attachment_has_no_url():
+async def test_forward_max_file_falls_back_to_text_when_file_lookup_has_no_url():
     sender = _make_media_sender(send_message_id=7201)
     resolver = _make_resolver()
     client = SimpleNamespace(
         download_file=AsyncMock(return_value=b"file-bytes"),
-        fetch_message=AsyncMock(
-            return_value={
-                "body": {
-                    "attachments": [
-                        _rest_file_attachment(
-                            url=None,
-                            token="file-token",
-                            filename="report.pdf",
-                            size=123,
-                        )
-                    ]
-                }
-            }
-        ),
+        fetch_file_download_url=AsyncMock(return_value=None),
     )
 
     msg = MaxMessage(
@@ -526,7 +418,11 @@ async def test_forward_max_file_falls_back_to_text_when_fetched_attachment_has_n
         resolver=resolver,
     )
 
-    client.fetch_message.assert_awaited_once_with("max-file-4")
+    client.fetch_file_download_url.assert_awaited_once_with(
+        file_id=94,
+        chat_id=42,
+        message_id="max-file-4",
+    )
     client.download_file.assert_not_awaited()
     sender.send_document.assert_not_awaited()
     assert sender.send.await_count == 1
@@ -534,24 +430,12 @@ async def test_forward_max_file_falls_back_to_text_when_fetched_attachment_has_n
 
 
 @pytest.mark.asyncio
-async def test_forward_max_forwarded_file_uses_linked_message_id_for_hydration():
+async def test_forward_max_forwarded_file_uses_linked_message_context_for_lookup():
     sender = _make_media_sender()
     resolver = _make_resolver()
     client = SimpleNamespace(
         download_file=AsyncMock(return_value=b"linked-file-bytes"),
-        fetch_message=AsyncMock(
-            return_value={
-                "body": {
-                    "attachments": [
-                        _rest_file_attachment(
-                            url="https://example.com/linked.pdf",
-                            token="linked-token",
-                            filename="linked.pdf",
-                        )
-                    ]
-                }
-            }
-        ),
+        fetch_file_download_url=AsyncMock(return_value="https://example.com/linked.pdf"),
     )
 
     msg = MaxMessage(
@@ -563,13 +447,13 @@ async def test_forward_max_forwarded_file_uses_linked_message_id_for_hydration()
             "type": "FORWARD",
             "message": {
                 "id": "linked-1",
+                "chatId": 777,
                 "attaches": [
                     {
                         "_type": "FILE",
                         "name": "linked.pdf",
                         "size": 50,
                         "fileId": 95,
-                        "token": "linked-token",
                     }
                 ],
             },
@@ -583,18 +467,22 @@ async def test_forward_max_forwarded_file_uses_linked_message_id_for_hydration()
         resolver=resolver,
     )
 
-    client.fetch_message.assert_awaited_once_with("linked-1")
+    client.fetch_file_download_url.assert_awaited_once_with(
+        file_id=95,
+        chat_id=777,
+        message_id="linked-1",
+    )
     client.download_file.assert_awaited_once_with("https://example.com/linked.pdf")
     sender.send_document.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_forward_max_file_with_existing_url_bypasses_fetch_message():
+async def test_forward_max_file_with_existing_url_bypasses_file_lookup():
     sender = _make_media_sender()
     resolver = _make_resolver()
     client = SimpleNamespace(
         download_file=AsyncMock(return_value=b"file-bytes"),
-        fetch_message=AsyncMock(return_value={}),
+        fetch_file_download_url=AsyncMock(return_value=None),
     )
 
     msg = MaxMessage(
@@ -620,6 +508,6 @@ async def test_forward_max_file_with_existing_url_bypasses_fetch_message():
         resolver=resolver,
     )
 
-    client.fetch_message.assert_not_awaited()
+    client.fetch_file_download_url.assert_not_awaited()
     client.download_file.assert_awaited_once_with("https://example.com/direct.pdf")
     sender.send_document.assert_awaited_once()

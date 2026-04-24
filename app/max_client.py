@@ -76,6 +76,7 @@ class OpCode(IntEnum):
     UPLOAD_ATTACH = 65
     EDIT_MESSAGE = 67
     PHOTO_UPLOAD_URL = 80
+    FILE_DOWNLOAD_URL = 88
     DISPATCH = 128
 
 
@@ -686,6 +687,56 @@ class MaxClient:
                 await session.close()
         return {}
 
+    async def fetch_file_download_url(self, *, file_id: Any, chat_id: Any, message_id: str) -> str | None:
+        """Resolve a downloadable file URL via the MAX WebSocket protocol."""
+        if file_id in (None, "") or chat_id in (None, "") or not message_id:
+            return None
+
+        try:
+            normalized_file_id = int(file_id)
+            normalized_chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            log.warning(
+                "Fetch file download URL skipped due to invalid identifiers: file_id=%r chat_id=%r message_id=%r",
+                file_id,
+                chat_id,
+                message_id,
+            )
+            return None
+
+        response_payload = await self.cmd(
+            OpCode.FILE_DOWNLOAD_URL,
+            {
+                "fileId": normalized_file_id,
+                "chatId": normalized_chat_id,
+                "messageId": str(message_id),
+            },
+        )
+        cmd_error = self._extract_cmd_error(response_payload)
+        if cmd_error is not None:
+            log.warning(
+                "Fetch file download URL failed file_id=%s chat_id=%s message_id=%s: %s",
+                normalized_file_id,
+                normalized_chat_id,
+                message_id,
+                cmd_error,
+            )
+            return None
+
+        url = self._extract_http_url(response_payload)
+        if url:
+            return url
+
+        payload_preview = list(response_payload.keys()) if isinstance(response_payload, dict) else type(response_payload).__name__
+        log.warning(
+            "Fetch file download URL returned no URL for file_id=%s chat_id=%s message_id=%s payload=%s",
+            normalized_file_id,
+            normalized_chat_id,
+            message_id,
+            payload_preview,
+        )
+        return None
+
     async def download_file_result(self, url: str) -> DownloadResult:
         """Download a file by URL, returning payload and response metadata."""
         if not url:
@@ -847,6 +898,30 @@ class MaxClient:
         nested_file = payload.get("payload")
         if isinstance(nested_file, dict):
             return MaxClient._extract_upload_token(nested_file, container_keys=container_keys)
+        return None
+
+    @staticmethod
+    def _extract_http_url(payload: Any) -> str | None:
+        if isinstance(payload, str) and payload.startswith("http"):
+            return payload
+
+        if isinstance(payload, dict):
+            for key in ("url", "downloadUrl", "download", "src"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.startswith("http"):
+                    return value
+            for value in payload.values():
+                nested_url = MaxClient._extract_http_url(value)
+                if nested_url:
+                    return nested_url
+            return None
+
+        if isinstance(payload, list):
+            for item in payload:
+                nested_url = MaxClient._extract_http_url(item)
+                if nested_url:
+                    return nested_url
+
         return None
 
     @staticmethod
