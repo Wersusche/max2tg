@@ -581,6 +581,7 @@ class TestSendHelpers:
             OpCode.VIDEO_DOWNLOAD_URL,
             {"videoId": 77, "chatId": 42, "messageId": "max-video-2", "token": "attach-token"},
         )
+        assert client.cmd.await_count == 2
 
     @pytest.mark.asyncio
     async def test_download_video_attachment_tries_multiple_candidates_until_video_payload(self):
@@ -678,7 +679,23 @@ class TestSendHelpers:
             OpCode.VIDEO_DOWNLOAD_URL,
             {"videoId": 77, "chatId": 42, "messageId": "max-video-token", "token": "attach-token"},
         )
+        assert client.cmd.await_count == 2
         assert client.download_file_result.await_args_list[-1].args == ("https://example.com/good.mp4",)
+
+    def test_build_video_download_request_payloads_uses_only_safe_websocket_variants(self):
+        client = MaxClient(token="auth-token", device_id="dev")
+
+        payloads = client._build_video_download_request_payloads(
+            video_id=77,
+            chat_id=42,
+            message_id="max-video-safe",
+            token="attach-token",
+        )
+
+        assert payloads == [
+            {"videoId": 77, "chatId": 42, "messageId": "max-video-safe"},
+            {"videoId": 77, "chatId": 42, "messageId": "max-video-safe", "token": "attach-token"},
+        ]
 
     @pytest.mark.asyncio
     async def test_resolve_okru_external_video_url_uses_mobile_page_player_payload(self):
