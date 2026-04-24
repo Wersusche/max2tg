@@ -834,6 +834,21 @@ class TestSendHelpers:
             "https://wg32.ok.ru/web-api/video/moviePlayer/14261721980814",
         ]
 
+    def test_extract_video_http_urls_normalizes_relative_cache_and_external_candidates(self):
+        payload = {
+            "MP4_240": "https://cdn.example/video-240.mp4",
+            "EXTERNAL": "//m.ok.ru/video/14261721980814",
+            "cache": "/web-api/video/moviePlayer/14261721980814#abc",
+        }
+
+        urls = MaxClient._extract_video_http_urls(payload)
+
+        assert urls == [
+            "https://cdn.example/video-240.mp4",
+            "https://m.ok.ru/video/14261721980814",
+            "https://ok.ru/web-api/video/moviePlayer/14261721980814#abc",
+        ]
+
     @pytest.mark.asyncio
     async def test_resolve_okru_desktop_video_url_uses_videoembed_before_video_page(self):
         client = MaxClient(token="tok", device_id="dev")

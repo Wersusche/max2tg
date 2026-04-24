@@ -823,6 +823,11 @@ class MaxClient:
 
         for index, request_payload in enumerate(request_payloads, start=1):
             response_payload = await self.cmd(OpCode.VIDEO_DOWNLOAD_URL, request_payload)
+            if self.debug and isinstance(response_payload, dict):
+                self._dump_json(
+                    f"video_download_{normalized_video_id}_{index}.json",
+                    response_payload,
+                )
             cmd_error = self._extract_cmd_error(response_payload)
             if cmd_error is not None:
                 log.warning(
@@ -913,6 +918,11 @@ class MaxClient:
 
         for attempt_index, request_payload in enumerate(request_payloads, start=1):
             response_payload = await self.cmd(OpCode.VIDEO_DOWNLOAD_URL, request_payload)
+            if self.debug and isinstance(response_payload, dict):
+                self._dump_json(
+                    f"video_download_{normalized_video_id}_{attempt_index}.json",
+                    response_payload,
+                )
             cmd_error = self._extract_cmd_error(response_payload)
             if cmd_error is not None:
                 log.warning(
@@ -1155,6 +1165,16 @@ class MaxClient:
             log.exception("Failed to dump %s", path)
 
     @staticmethod
+    def _dump_text(filename: str, data: str) -> None:
+        path = os.path.join(DEBUG_DIR, filename)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(data)
+            log.info("Dumped %s (%d bytes)", path, os.path.getsize(path))
+        except Exception:
+            log.exception("Failed to dump %s", path)
+
+    @staticmethod
     def _extract_upload_token(
         payload: dict,
         *,
@@ -1222,12 +1242,34 @@ class MaxClient:
                     best = max(best, int(part))
             return best
 
+        def _normalize_candidate_url(path: str, url: str) -> str | None:
+            if not isinstance(url, str):
+                return None
+
+            normalized = html.unescape(url).strip().replace("\\/", "/")
+            if normalized.startswith("http"):
+                return normalized
+            if normalized.startswith("//"):
+                return f"https:{normalized}"
+            if normalized.startswith(("ok.ru/", "m.ok.ru/", "mobile.ok.ru/", "www.ok.ru/")):
+                return f"https://{normalized}"
+
+            path_upper = path.upper()
+            if "EXTERNAL" in path_upper or "CACHE" in path_upper:
+                if normalized.startswith("/"):
+                    return f"https://ok.ru{normalized}"
+                if normalized.startswith(("video/", "videoembed/", "web-api/video/moviePlayer/", "live/", "dk?")):
+                    return f"https://ok.ru/{normalized.lstrip('/')}"
+
+            return None
+
         def _register_candidate(path: str, url: str) -> None:
-            if not isinstance(url, str) or not url.startswith("http") or url in seen:
+            normalized_url = _normalize_candidate_url(path, url)
+            if not normalized_url or normalized_url in seen:
                 return
 
             path_upper = path.upper()
-            if path_upper.startswith("MP4") or ".MP4" in path_upper or "MP4" in path_upper or url.lower().endswith(".mp4"):
+            if path_upper.startswith("MP4") or ".MP4" in path_upper or "MP4" in path_upper or normalized_url.lower().endswith(".mp4"):
                 priority = 0
                 quality = _quality_from_key(path_upper)
             elif "EXTERNAL" in path_upper:
@@ -1239,8 +1281,8 @@ class MaxClient:
             else:
                 return
 
-            seen.add(url)
-            candidates.append((priority, -quality, url))
+            seen.add(normalized_url)
+            candidates.append((priority, -quality, normalized_url))
 
         def _collect(value: Any, *, path: str = "") -> None:
             if isinstance(value, str):
@@ -1297,6 +1339,8 @@ class MaxClient:
             return fallback_url
 
         if not video_src:
+            if self.debug and video_id:
+                self._dump_text(f"okru_mobile_{video_id}.html", html_text)
             log.warning(
                 "Failed to extract OK.ru videoSrc from external page %s (has_data_video=%s has_video_src=%s)",
                 page_url[:120],
@@ -1339,6 +1383,9 @@ class MaxClient:
 
             player = self._extract_okru_player_data(webpage, video_id=video_id)
             if not isinstance(player, dict):
+                if self.debug:
+                    safe_label = re.sub(r"[^a-zA-Z0-9]+", "_", desktop_url).strip("_")[:80]
+                    self._dump_text(f"okru_player_{video_id}_{safe_label}.html", webpage)
                 last_reason = f"player payload missing in {desktop_url}"
                 continue
 
