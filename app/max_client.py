@@ -841,11 +841,9 @@ class MaxClient:
         if not url:
             return DownloadResult()
 
-        session = getattr(self, "_session", None)
-        close_after = False
-        if session is None or session.closed:
-            session = aiohttp.ClientSession(headers=_BROWSER_HEADERS)
-            close_after = True
+        # Use a dedicated session without browser default headers so signed media
+        # requests don't inherit Origin/Referer/Sec-Fetch from the websocket session.
+        session = aiohttp.ClientSession()
 
         headers, used_authorization = self._download_headers(url)
         try:
@@ -908,8 +906,7 @@ class MaxClient:
             )
             return result
         finally:
-            if close_after:
-                await session.close()
+            await session.close()
 
     async def download_file(self, url: str) -> bytes | None:
         """Download a file by URL, returning raw bytes or None on failure."""
