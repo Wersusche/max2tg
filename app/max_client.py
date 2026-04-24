@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any
-from urllib.parse import parse_qsl, quote, urlparse
+from urllib.parse import parse_qsl, quote, unquote, urlparse
 
 import aiohttp
 
@@ -1163,6 +1163,13 @@ class MaxClient:
 
     async def _resolve_okru_external_video_url(self, page_url: str, html_bytes: bytes) -> str | None:
         video_src = self._extract_okru_video_src(html_bytes)
+        if video_src:
+            return await self._resolve_redirect_url(video_src)
+
+        fallback_url = await self._resolve_okru_desktop_video_url(page_url)
+        if fallback_url:
+            return fallback_url
+
         if not video_src:
             html_text = html_bytes.decode("utf-8", errors="ignore")
             log.warning(
@@ -1174,6 +1181,202 @@ class MaxClient:
             return None
         return await self._resolve_redirect_url(video_src)
 
+    async def _resolve_okru_desktop_video_url(self, page_url: str) -> str | None:
+        video_id = self._extract_okru_video_id(page_url)
+        if not video_id:
+            return None
+
+        webpage = await self._fetch_text_page(f"https://ok.ru/video/{video_id}")
+        if not webpage:
+            return None
+
+        player = self._extract_okru_player_data(webpage)
+        if not isinstance(player, dict):
+            log.warning("Failed to extract OK.ru player payload for video_id=%s", video_id)
+            return None
+
+        flashvars = player.get("flashvars")
+        if not isinstance(flashvars, dict):
+            log.warning("OK.ru player payload missing flashvars for video_id=%s", video_id)
+            return None
+
+        metadata = await self._extract_okru_metadata(video_id, flashvars)
+        if not isinstance(metadata, dict):
+            log.warning("Failed to extract OK.ru metadata for video_id=%s", video_id)
+            return None
+
+        urls = self._extract_okru_metadata_urls(metadata)
+        if urls:
+            log.info("Resolved %d OK.ru desktop metadata URL(s) for video_id=%s", len(urls), video_id)
+            return urls[0]
+        log.warning("OK.ru metadata contained no direct video URLs for video_id=%s", video_id)
+        return None
+
+    async def _fetch_text_page(self, url: str, *, headers: dict[str, str] | None = None) -> str | None:
+        session = aiohttp.ClientSession()
+        try:
+            async with session.get(
+                url,
+                headers=headers or dict(_BROWSER_HEADERS),
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.text(errors="ignore")
+                body = await resp.text(errors="ignore")
+                log.warning("Fetch text page failed %s - HTTP %d: %s", url[:120], resp.status, body[:200])
+        except Exception:
+            log.debug("Fetch text page error for %s", url[:120], exc_info=True)
+        finally:
+            await session.close()
+        return None
+
+    async def _fetch_json_page(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        data: dict[str, str] | None = None,
+    ) -> dict | None:
+        session = aiohttp.ClientSession()
+        try:
+            async with session.post(
+                url,
+                headers=headers or {"Accept": "application/json", **_BROWSER_HEADERS},
+                data=data,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json(content_type=None)
+                body = await resp.text(errors="ignore")
+                log.warning("Fetch JSON page failed %s - HTTP %d: %s", url[:120], resp.status, body[:200])
+        except Exception:
+            log.debug("Fetch JSON page error for %s", url[:120], exc_info=True)
+        finally:
+            await session.close()
+        return None
+
+    @staticmethod
+    def _extract_okru_video_id(url: str) -> str | None:
+        parsed = urlparse(url)
+        path = parsed.path or ""
+        for pattern in (r"/video(?:embed)?/(?P<id>[\d-]+)", r"/live/(?P<id>[\d-]+)"):
+            match = re.search(pattern, path)
+            if match:
+                return match.group("id")
+
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        for key in ("st.mvId", "mvId", "videoId", "id"):
+            value = query.get(key)
+            if value and re.fullmatch(r"[\d-]+", value):
+                return value
+        return None
+
+    @staticmethod
+    def _extract_okru_player_data(webpage: str) -> dict | None:
+        attr_value = MaxClient._extract_html_attribute(webpage, "data-options")
+        candidate_values: list[str] = []
+        if attr_value:
+            candidate_values.append(attr_value)
+
+        regex_match = re.search(
+            r"data-options=(?P<quote>[\"'])(?P<payload>.+?)(?P=quote)",
+            webpage,
+            flags=re.DOTALL,
+        )
+        if regex_match:
+            candidate_values.append(regex_match.group("payload"))
+
+        for raw_value in candidate_values:
+            payload = MaxClient._parse_jsonish(raw_value)
+            if isinstance(payload, dict):
+                return payload
+
+        return None
+
+    async def _extract_okru_metadata(self, video_id: str, flashvars: dict) -> dict | None:
+        metadata = flashvars.get("metadata")
+        if isinstance(metadata, dict):
+            return metadata
+        if isinstance(metadata, str) and metadata:
+            payload = self._parse_jsonish(metadata)
+            if isinstance(payload, dict):
+                return payload
+
+        metadata_url = flashvars.get("metadataUrl")
+        if not isinstance(metadata_url, str) or not metadata_url:
+            return None
+
+        request_url = html.unescape(unquote(metadata_url))
+        if request_url.startswith("/"):
+            request_url = f"https://ok.ru{request_url}"
+        elif not request_url.startswith("http"):
+            request_url = f"https://ok.ru/{request_url.lstrip('/')}"
+
+        data: dict[str, str] | None = None
+        location = flashvars.get("location")
+        if isinstance(location, str) and location:
+            data = {"st.location": location}
+
+        headers = {
+            **_BROWSER_HEADERS,
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Origin": "https://ok.ru",
+            "Referer": f"https://ok.ru/video/{video_id}",
+        }
+        return await self._fetch_json_page(request_url, headers=headers, data=data)
+
+    @staticmethod
+    def _extract_okru_metadata_urls(metadata: dict) -> list[str]:
+        candidates: list[tuple[int, int, str]] = []
+        seen: set[str] = set()
+
+        def _quality_from_text(value: Any) -> int:
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str):
+                numbers = [int(part) for part in re.findall(r"\d+", value)]
+                if numbers:
+                    return max(numbers)
+                mapping = {
+                    "ultrahd": 2160,
+                    "quad": 1440,
+                    "fullhd": 1080,
+                    "hd": 720,
+                    "sd": 480,
+                    "low": 360,
+                    "mobile": 240,
+                }
+                lowered = value.lower()
+                for label, quality in mapping.items():
+                    if label in lowered:
+                        return quality
+            return 0
+
+        videos = metadata.get("videos")
+        if isinstance(videos, list):
+            for index, item in enumerate(videos):
+                if not isinstance(item, dict):
+                    continue
+                url = item.get("url")
+                if not isinstance(url, str) or not url.startswith("http") or url in seen:
+                    continue
+                quality = max(
+                    _quality_from_text(item.get("name")),
+                    _quality_from_text(item.get("quality")),
+                    _quality_from_text(item.get("type")),
+                )
+                seen.add(url)
+                candidates.append((-quality, index, url))
+
+        for key in ("videoSrc", "videoUrl"):
+            url = metadata.get(key)
+            if isinstance(url, str) and url.startswith("http") and url not in seen:
+                seen.add(url)
+                candidates.append((0, len(candidates), url))
+
+        candidates.sort()
+        return [url for _, _, url in candidates]
+
     @staticmethod
     def _extract_okru_video_src(html_bytes: bytes) -> str | None:
         html_text = html_bytes.decode("utf-8", errors="ignore")
@@ -1181,10 +1384,7 @@ class MaxClient:
         for text in (html_text, html.unescape(html_text)):
             attr_value = MaxClient._extract_html_attribute(text, "data-video")
             if attr_value:
-                try:
-                    payload = json.loads(html.unescape(attr_value))
-                except Exception:
-                    payload = None
+                payload = MaxClient._parse_jsonish(attr_value)
 
                 video_src = payload.get("videoSrc") if isinstance(payload, dict) else None
                 if isinstance(video_src, str) and video_src.startswith("http"):
@@ -1194,6 +1394,42 @@ class MaxClient:
             if direct_video_src:
                 return direct_video_src
 
+        return None
+
+    @staticmethod
+    def _parse_jsonish(raw_value: str) -> Any:
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        def _add(value: str | None) -> None:
+            if not isinstance(value, str) or value in seen:
+                return
+            seen.add(value)
+            candidates.append(value)
+
+        _add(raw_value)
+        _add(html.unescape(raw_value))
+
+        for value in list(candidates):
+            normalized = value
+            for _ in range(3):
+                collapsed = normalized.replace("\\\\\"", "\\\"").replace("\\\\'", "\\'")
+                if collapsed == normalized:
+                    break
+                normalized = collapsed
+                _add(normalized)
+
+            if "\\u" in value or "\\x" in value or "\\\\" in value:
+                try:
+                    _add(bytes(value, "utf-8").decode("unicode_escape"))
+                except Exception:
+                    pass
+
+        for candidate in candidates:
+            try:
+                return json.loads(candidate)
+            except Exception:
+                continue
         return None
 
     @staticmethod
