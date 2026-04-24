@@ -1162,16 +1162,29 @@ class MaxClient:
         return content_type == "text/html" and (host == "ok.ru" or host.endswith(".ok.ru"))
 
     async def _resolve_okru_external_video_url(self, page_url: str, html_bytes: bytes) -> str | None:
+        html_text = html_bytes.decode("utf-8", errors="ignore")
+        video_id = self._extract_okru_video_id(page_url)
         video_src = self._extract_okru_video_src(html_bytes)
         if video_src:
             return await self._resolve_redirect_url(video_src)
 
-        fallback_url = await self._resolve_okru_desktop_video_url(page_url)
+        player = self._extract_okru_player_data(html_text, video_id=video_id)
+        if isinstance(player, dict):
+            flashvars = player.get("flashvars")
+            if isinstance(flashvars, dict):
+                metadata = await self._extract_okru_metadata(video_id or "", flashvars)
+                if isinstance(metadata, dict):
+                    urls = self._extract_okru_metadata_urls(metadata)
+                    if urls:
+                        log.info("Resolved %d OK.ru URL(s) directly from mobile page for video_id=%s", len(urls), video_id)
+                        return urls[0]
+
+        seed_urls = self._extract_okru_movie_player_urls(html_text, video_id or "") if video_id else []
+        fallback_url = await self._resolve_okru_desktop_video_url(page_url, seed_urls=seed_urls)
         if fallback_url:
             return fallback_url
 
         if not video_src:
-            html_text = html_bytes.decode("utf-8", errors="ignore")
             log.warning(
                 "Failed to extract OK.ru videoSrc from external page %s (has_data_video=%s has_video_src=%s)",
                 page_url[:120],
@@ -1181,16 +1194,17 @@ class MaxClient:
             return None
         return await self._resolve_redirect_url(video_src)
 
-    async def _resolve_okru_desktop_video_url(self, page_url: str) -> str | None:
+    async def _resolve_okru_desktop_video_url(self, page_url: str, *, seed_urls: list[str] | None = None) -> str | None:
         video_id = self._extract_okru_video_id(page_url)
         if not video_id:
             return None
 
-        page_variants = [
+        page_variants = list(seed_urls or [])
+        page_variants.extend([
             f"https://ok.ru/videoembed/{video_id}",
             f"https://ok.ru/video/{video_id}",
             f"https://ok.ru/web-api/video/moviePlayer/{video_id}",
-        ]
+        ])
         seen_pages: set[str] = set()
         last_reason = "webpage missing"
         queue_index = 0
