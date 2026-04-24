@@ -1186,30 +1186,44 @@ class MaxClient:
         if not video_id:
             return None
 
-        webpage = await self._fetch_text_page(f"https://ok.ru/video/{video_id}")
-        if not webpage:
-            return None
+        page_variants = (
+            f"https://ok.ru/videoembed/{video_id}",
+            f"https://ok.ru/video/{video_id}",
+        )
+        last_reason = "webpage missing"
+        for desktop_url in page_variants:
+            webpage = await self._fetch_text_page(desktop_url)
+            if not webpage:
+                last_reason = f"fetch failed for {desktop_url}"
+                continue
 
-        player = self._extract_okru_player_data(webpage)
-        if not isinstance(player, dict):
-            log.warning("Failed to extract OK.ru player payload for video_id=%s", video_id)
-            return None
+            player = self._extract_okru_player_data(webpage)
+            if not isinstance(player, dict):
+                last_reason = f"player payload missing in {desktop_url}"
+                continue
 
-        flashvars = player.get("flashvars")
-        if not isinstance(flashvars, dict):
-            log.warning("OK.ru player payload missing flashvars for video_id=%s", video_id)
-            return None
+            flashvars = player.get("flashvars")
+            if not isinstance(flashvars, dict):
+                last_reason = f"flashvars missing in {desktop_url}"
+                continue
 
-        metadata = await self._extract_okru_metadata(video_id, flashvars)
-        if not isinstance(metadata, dict):
-            log.warning("Failed to extract OK.ru metadata for video_id=%s", video_id)
-            return None
+            metadata = await self._extract_okru_metadata(video_id, flashvars)
+            if not isinstance(metadata, dict):
+                last_reason = f"metadata missing in {desktop_url}"
+                continue
 
-        urls = self._extract_okru_metadata_urls(metadata)
-        if urls:
-            log.info("Resolved %d OK.ru desktop metadata URL(s) for video_id=%s", len(urls), video_id)
-            return urls[0]
-        log.warning("OK.ru metadata contained no direct video URLs for video_id=%s", video_id)
+            urls = self._extract_okru_metadata_urls(metadata)
+            if urls:
+                log.info(
+                    "Resolved %d OK.ru desktop metadata URL(s) for video_id=%s via %s",
+                    len(urls),
+                    video_id,
+                    desktop_url,
+                )
+                return urls[0]
+            last_reason = f"metadata URL list empty in {desktop_url}"
+
+        log.warning("Failed to extract OK.ru player payload for video_id=%s (%s)", video_id, last_reason)
         return None
 
     async def _fetch_text_page(self, url: str, *, headers: dict[str, str] | None = None) -> str | None:
@@ -1273,13 +1287,21 @@ class MaxClient:
 
     @staticmethod
     def _extract_okru_player_data(webpage: str) -> dict | None:
-        attr_value = MaxClient._extract_html_attribute(webpage, "data-options")
         candidate_values: list[str] = []
-        if attr_value:
-            candidate_values.append(attr_value)
+        for attr_name in ("data-options", "data-attributes"):
+            attr_value = MaxClient._extract_html_attribute(webpage, attr_name)
+            if attr_value:
+                candidate_values.append(attr_value)
 
         regex_match = re.search(
             r"data-options=(?P<quote>[\"'])(?P<payload>.+?)(?P=quote)",
+            webpage,
+            flags=re.DOTALL,
+        )
+        if regex_match:
+            candidate_values.append(regex_match.group("payload"))
+        regex_match = re.search(
+            r"data-attributes=(?P<quote>[\"'])(?P<payload>.+?)(?P=quote)",
             webpage,
             flags=re.DOTALL,
         )
@@ -1291,6 +1313,22 @@ class MaxClient:
             if isinstance(payload, dict):
                 return payload
 
+        flashvars = MaxClient._extract_okru_flashvars(webpage)
+        if flashvars:
+            return {"flashvars": flashvars}
+
+        return None
+
+    @staticmethod
+    def _extract_okru_flashvars(text: str) -> dict | None:
+        flashvars: dict[str, str] = {}
+        for source in (text, html.unescape(text)):
+            for field_name in ("metadataUrl", "metadata", "location", "url"):
+                field_value = MaxClient._search_jsonish_string_field(source, field_name)
+                if isinstance(field_value, str) and field_value:
+                    flashvars.setdefault(field_name, field_value)
+            if "metadata" in flashvars or "metadataUrl" in flashvars:
+                return flashvars
         return None
 
     async def _extract_okru_metadata(self, video_id: str, flashvars: dict) -> dict | None:
@@ -1480,6 +1518,28 @@ class MaxClient:
             if isinstance(decoded, str) and decoded.startswith("http"):
                 return decoded
 
+        return None
+
+    @staticmethod
+    def _search_jsonish_string_field(text: str, field_name: str) -> str | None:
+        escaped_field = re.escape(field_name)
+        patterns = (
+            rf'"{escaped_field}"\s*:\s*"(?P<value>(?:\\.|[^"])*)"',
+            rf"'{escaped_field}'\s*:\s*'(?P<value>(?:\\.|[^'])*)'",
+            rf"{escaped_field}\s*:\s*\"(?P<value>(?:\\.|[^\"])*)\"",
+            rf"{escaped_field}\s*:\s*'(?P<value>(?:\\.|[^'])*)'",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.DOTALL)
+            if not match:
+                continue
+            raw_value = match.group("value")
+            try:
+                decoded = json.loads(f'"{raw_value}"')
+            except Exception:
+                decoded = html.unescape(raw_value).replace("\\/", "/")
+            if isinstance(decoded, str) and decoded:
+                return decoded
         return None
 
     async def _resolve_redirect_url(self, url: str) -> str | None:
