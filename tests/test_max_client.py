@@ -604,7 +604,10 @@ class TestSendHelpers:
         _, second_kwargs = session.calls[1]
         assert first_kwargs["headers"]["Authorization"] == "tok"
         assert "Authorization" not in second_kwargs["headers"]
-        assert second_kwargs["headers"]["Origin"] == _HTTP_HEADERS["Origin"]
+        assert "Origin" not in first_kwargs["headers"]
+        assert "Referer" not in first_kwargs["headers"]
+        assert "Origin" not in second_kwargs["headers"]
+        assert "Referer" not in second_kwargs["headers"]
 
     @pytest.mark.asyncio
     async def test_download_file_skips_authorization_for_external_urls(self):

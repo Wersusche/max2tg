@@ -52,6 +52,12 @@ _HTTP_HEADERS = {
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Site": "cross-site",
 }
+_SIGNED_MEDIA_HEADERS = {
+    "User-Agent": _USER_AGENT,
+    "Accept": "*/*",
+    "Accept-Language": _BROWSER_HEADERS["Accept-Language"],
+    "Accept-Encoding": _BROWSER_HEADERS["Accept-Encoding"],
+}
 
 _PLATFORM_API_BASE_URL = "https://platform-api.max.ru"
 _CMD_ERROR_MARKER = "__cmd_error__"
@@ -572,7 +578,7 @@ class MaxClient:
         return _SIGNED_MEDIA_QUERY_KEYS.issubset(query_keys)
 
     def _download_headers(self, url: str, *, use_authorization: bool | None = None) -> tuple[dict[str, str], bool]:
-        headers = dict(_HTTP_HEADERS)
+        headers = dict(_SIGNED_MEDIA_HEADERS if self._is_signed_max_media_url(url) else _HTTP_HEADERS)
         if use_authorization is None:
             use_authorization = self._is_max_media_url(url)
         if use_authorization:
