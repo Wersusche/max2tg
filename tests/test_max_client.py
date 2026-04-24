@@ -639,6 +639,32 @@ class TestSendHelpers:
         client._resolve_okru_external_video_url.assert_awaited_once_with("https://m.ok.ru/video/123", b"<html>page</html>")
         assert client.download_file_result.await_args_list[2].args == ("https://example.com/redirected.mp4",)
 
+    @pytest.mark.asyncio
+    async def test_resolve_okru_external_video_url_uses_mobile_page_player_payload(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client._extract_okru_metadata = AsyncMock(
+            return_value={
+                "videos": [
+                    {"name": "mobile", "url": "https://cdn.example/video-240.mp4"},
+                    {"name": "hd", "url": "https://cdn.example/video-720.mp4"},
+                ]
+            }
+        )
+
+        payload = await client._resolve_okru_external_video_url(
+            "https://m.ok.ru/video/14261721980814",
+            (
+                b'<div data-attributes="{&quot;flashvars&quot;:{&quot;metadataUrl&quot;:&quot;https%3A%2F%2Fok.ru%2Fmetadata&quot;,'
+                b'&quot;location&quot;:&quot;SEARCH&quot;}}"></div>'
+            ),
+        )
+
+        assert payload == "https://cdn.example/video-720.mp4"
+        client._extract_okru_metadata.assert_awaited_once_with(
+            "14261721980814",
+            {"metadataUrl": "https%3A%2F%2Fok.ru%2Fmetadata", "location": "SEARCH"},
+        )
+
     def test_extract_okru_video_src_parses_data_video_json(self):
         html_bytes = (
             b'<div data-video=\"{&quot;videoSrc&quot;:&quot;https://vid.example/stream&quot;,&quot;videoName&quot;:&quot;test&quot;}\"></div>'
