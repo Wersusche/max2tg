@@ -391,8 +391,8 @@ async def test_forward_max_video_hydrates_video_from_websocket_lookup():
     sender = _make_media_sender()
     resolver = _make_resolver()
     client = SimpleNamespace(
-        download_file=AsyncMock(return_value=b"video-bytes"),
-        fetch_video_download_url=AsyncMock(return_value="https://example.com/video-1080.mp4"),
+        download_video_attachment=AsyncMock(return_value=b"video-bytes"),
+        download_file=AsyncMock(return_value=b"unused"),
     )
 
     msg = MaxMessage(
@@ -417,13 +417,12 @@ async def test_forward_max_video_hydrates_video_from_websocket_lookup():
         resolver=resolver,
     )
 
-    client.fetch_video_download_url.assert_awaited_once_with(
+    client.download_video_attachment.assert_awaited_once_with(
         video_id=77,
         chat_id=42,
         message_id="max-video-1",
         token="video-token",
     )
-    client.download_file.assert_awaited_once_with("https://example.com/video-1080.mp4")
     sender.send_video.assert_awaited_once()
     assert sender.send_video.await_args.args[0] == b"video-bytes"
     assert sender.send_video.await_args.kwargs["filename"] == "video-77.mp4"

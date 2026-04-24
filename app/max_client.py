@@ -105,6 +105,7 @@ class DownloadResult:
     data: bytes | None = None
     status: int | None = None
     used_authorization: bool = False
+    content_type: str | None = None
 
 
 class MaxClient:
@@ -606,6 +607,7 @@ class MaxClient:
                             data=data,
                             status=resp.status,
                             used_authorization=used_authorization,
+                            content_type=resp.headers.get("Content-Type"),
                         ),
                         "",
                     )
@@ -744,17 +746,17 @@ class MaxClient:
         )
         return None
 
-    async def fetch_video_download_url(
+    async def fetch_video_download_urls(
         self,
         *,
         video_id: Any,
         chat_id: Any,
         message_id: str,
         token: str | None = None,
-    ) -> str | None:
-        """Resolve a downloadable video URL via the MAX WebSocket protocol."""
+    ) -> list[str]:
+        """Resolve downloadable video URLs via the MAX WebSocket protocol."""
         if video_id in (None, "") or chat_id in (None, "") or not message_id:
-            return None
+            return []
 
         try:
             normalized_video_id = int(video_id)
@@ -766,7 +768,7 @@ class MaxClient:
                 chat_id,
                 message_id,
             )
-            return None
+            return []
 
         request_payloads: list[dict[str, Any]] = [
             {
@@ -809,15 +811,16 @@ class MaxClient:
                 )
                 continue
 
-            url = self._extract_video_http_url(response_payload)
-            if url:
+            urls = self._extract_video_http_urls(response_payload)
+            if urls:
                 log.info(
-                    "Resolved video download URL via websocket attempt=%d video_id=%s keys=%s",
+                    "Resolved %d video download URL(s) via websocket attempt=%d video_id=%s keys=%s",
+                    len(urls),
                     index,
                     normalized_video_id,
                     list(response_payload.keys()) if isinstance(response_payload, dict) else type(response_payload).__name__,
                 )
-                return url
+                return urls
 
             last_payload_preview = list(response_payload.keys()) if isinstance(response_payload, dict) else type(response_payload).__name__
             log.info(
@@ -834,6 +837,57 @@ class MaxClient:
             message_id,
             last_payload_preview,
         )
+        return []
+
+    async def fetch_video_download_url(
+        self,
+        *,
+        video_id: Any,
+        chat_id: Any,
+        message_id: str,
+        token: str | None = None,
+    ) -> str | None:
+        urls = await self.fetch_video_download_urls(
+            video_id=video_id,
+            chat_id=chat_id,
+            message_id=message_id,
+            token=token,
+        )
+        return urls[0] if urls else None
+
+    async def download_video_attachment(
+        self,
+        *,
+        video_id: Any,
+        chat_id: Any,
+        message_id: str,
+        token: str | None = None,
+    ) -> bytes | None:
+        urls = await self.fetch_video_download_urls(
+            video_id=video_id,
+            chat_id=chat_id,
+            message_id=message_id,
+            token=token,
+        )
+        for index, url in enumerate(urls, start=1):
+            result = await self.download_file_result(url)
+            if self._is_video_download_result(result):
+                log.info(
+                    "Downloaded playable video candidate=%d video_id=%s content_type=%s bytes=%d",
+                    index,
+                    video_id,
+                    result.content_type,
+                    len(result.data or b""),
+                )
+                return result.data
+            if result.data is not None:
+                log.warning(
+                    "Video candidate=%d for video_id=%s downloaded non-video payload content_type=%s bytes=%d",
+                    index,
+                    video_id,
+                    result.content_type,
+                    len(result.data),
+                )
         return None
 
     async def download_file_result(self, url: str) -> DownloadResult:
@@ -1021,8 +1075,9 @@ class MaxClient:
         return None
 
     @staticmethod
-    def _extract_video_http_url(payload: Any) -> str | None:
-        mp4_candidates: list[tuple[int, str]] = []
+    def _extract_video_http_urls(payload: Any) -> list[str]:
+        candidates: list[tuple[int, int, str]] = []
+        seen: set[str] = set()
 
         def _quality_from_key(key: str) -> int:
             best = 0
@@ -1031,31 +1086,67 @@ class MaxClient:
                     best = max(best, int(part))
             return best
 
-        def _collect(value: Any) -> None:
+        def _register_candidate(path: str, url: str) -> None:
+            if not isinstance(url, str) or not url.startswith("http") or url in seen:
+                return
+
+            path_upper = path.upper()
+            if path_upper.startswith("MP4") or ".MP4" in path_upper or "MP4" in path_upper or url.lower().endswith(".mp4"):
+                priority = 0
+                quality = _quality_from_key(path_upper)
+            elif "EXTERNAL" in path_upper:
+                priority = 1
+                quality = 0
+            elif "CACHE" in path_upper:
+                priority = 2
+                quality = 0
+            else:
+                return
+
+            seen.add(url)
+            candidates.append((priority, -quality, url))
+
+        def _collect(value: Any, *, path: str = "") -> None:
             if isinstance(value, str):
+                _register_candidate(path, value)
                 return
 
             if isinstance(value, dict):
                 for key, nested in value.items():
-                    if isinstance(nested, str) and nested.startswith("http"):
-                        key_upper = str(key).upper()
-                        if key_upper.startswith("MP4") or "MP4" in key_upper or nested.lower().endswith(".mp4"):
-                            mp4_candidates.append((_quality_from_key(key_upper), nested))
-                        continue
-                    _collect(nested)
+                    next_path = f"{path}.{key}" if path else str(key)
+                    _collect(nested, path=next_path)
                 return
 
             if isinstance(value, list):
-                for item in value:
-                    _collect(item)
+                for index, item in enumerate(value):
+                    next_path = f"{path}[{index}]" if path else f"[{index}]"
+                    _collect(item, path=next_path)
 
         _collect(payload)
+        candidates.sort()
+        return [url for _, _, url in candidates]
 
-        if mp4_candidates:
-            mp4_candidates.sort(key=lambda item: item[0], reverse=True)
-            return mp4_candidates[0][1]
+    @staticmethod
+    def _extract_video_http_url(payload: Any) -> str | None:
+        urls = MaxClient._extract_video_http_urls(payload)
+        return urls[0] if urls else None
 
-        return None
+    @staticmethod
+    def _is_video_download_result(result: DownloadResult) -> bool:
+        data = result.data or b""
+        content_type = (result.content_type or "").split(";", 1)[0].strip().lower()
+        if content_type.startswith("video/"):
+            return True
+
+        # MP4/MOV place the file type marker after the 32-bit size field.
+        if len(data) >= 12 and data[4:8] == b"ftyp":
+            return True
+
+        # WebM / Matroska EBML header.
+        if data.startswith(b"\x1a\x45\xdf\xa3"):
+            return True
+
+        return False
 
     @staticmethod
     def _wrap_cmd_error(payload: Any) -> dict:

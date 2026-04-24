@@ -4,15 +4,24 @@ import asyncio
 
 import pytest
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
-from app.max_client import MaxClient, MaxMessage, OpCode, _HTTP_HEADERS
+from app.max_client import DownloadResult, MaxClient, MaxMessage, OpCode, _HTTP_HEADERS
 
 
 class _FakeResponse:
-    def __init__(self, *, status: int, payload: dict | None = None, text: str = "", body: bytes = b""):
+    def __init__(
+        self,
+        *,
+        status: int,
+        payload: dict | None = None,
+        text: str = "",
+        body: bytes = b"",
+        headers: dict | None = None,
+    ):
         self.status = status
         self._payload = payload or {}
         self._text = text
         self._body = body
+        self.headers = headers or {}
 
     async def __aenter__(self):
         return self
@@ -572,6 +581,34 @@ class TestSendHelpers:
             OpCode.VIDEO_DOWNLOAD_URL,
             {"videoId": 77, "chatId": 42, "messageId": "max-video-2", "token": "attach-token"},
         )
+
+    @pytest.mark.asyncio
+    async def test_download_video_attachment_tries_multiple_candidates_until_video_payload(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client.cmd = AsyncMock(
+            return_value={
+                "MP4_240": "https://example.com/bad.mp4",
+                "EXTERNAL": "https://example.com/good",
+                "cache": "https://example.com/cache",
+            }
+        )
+        client.download_file_result = AsyncMock(
+            side_effect=[
+                DownloadResult(status=400, used_authorization=False),
+                DownloadResult(data=b"\x00\x00\x00\x18ftypisomvideo", status=200, used_authorization=False, content_type="video/mp4"),
+            ]
+        )
+
+        payload = await client.download_video_attachment(
+            video_id=77,
+            chat_id=42,
+            message_id="max-video-3",
+            token="attach-token",
+        )
+
+        assert payload == b"\x00\x00\x00\x18ftypisomvideo"
+        assert client.download_file_result.await_args_list[0].args == ("https://example.com/bad.mp4",)
+        assert client.download_file_result.await_args_list[1].args == ("https://example.com/good",)
 
     @pytest.mark.asyncio
     async def test_download_file_uses_authorization_for_max_media_urls(self):
