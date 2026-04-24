@@ -653,6 +653,50 @@ class TestSendHelpers:
 
         assert MaxClient._extract_okru_video_src(html_bytes) == "https://vid.example/stream.mp4?sig=1"
 
+    def test_extract_okru_video_id_from_mobile_page(self):
+        assert MaxClient._extract_okru_video_id("https://m.ok.ru/video/14261721980814") == "14261721980814"
+
+    def test_extract_okru_player_data_parses_data_options_json(self):
+        webpage = (
+            '<div data-options="{&quot;flashvars&quot;:{&quot;metadata&quot;:&quot;{'
+            r'\\&quot;videos\\&quot;:[{\\&quot;name\\&quot;:\\&quot;hd\\&quot;,'
+            r'\\&quot;url\\&quot;:\\&quot;https://cdn.example/video-hd.mp4\\&quot;}]}&quot;}}"></div>'
+        )
+
+        payload = MaxClient._extract_okru_player_data(webpage)
+
+        assert payload == {
+            "flashvars": {
+                "metadata": '{"videos":[{"name":"hd","url":"https://cdn.example/video-hd.mp4"}]}'
+            }
+        }
+
+    @pytest.mark.asyncio
+    async def test_resolve_okru_desktop_video_url_uses_metadata_url(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client._fetch_text_page = AsyncMock(
+            return_value=(
+                '<div data-options="{&quot;flashvars&quot;:{&quot;metadataUrl&quot;:&quot;https%3A%2F%2Fok.ru%2Fmetadata&quot;,'
+                '&quot;location&quot;:&quot;SEARCH&quot;}}"></div>'
+            )
+        )
+        client._fetch_json_page = AsyncMock(
+            return_value={
+                "videos": [
+                    {"name": "mobile", "url": "https://cdn.example/video-240.mp4"},
+                    {"name": "hd", "url": "https://cdn.example/video-720.mp4"},
+                ]
+            }
+        )
+
+        payload = await client._resolve_okru_desktop_video_url("https://m.ok.ru/video/14261721980814")
+
+        assert payload == "https://cdn.example/video-720.mp4"
+        client._fetch_text_page.assert_awaited_once_with("https://ok.ru/video/14261721980814")
+        client._fetch_json_page.assert_awaited_once()
+        assert client._fetch_json_page.await_args.args[0] == "https://ok.ru/metadata"
+        assert client._fetch_json_page.await_args.kwargs["data"] == {"st.location": "SEARCH"}
+
     @pytest.mark.asyncio
     async def test_download_file_uses_authorization_for_max_media_urls(self):
         client = MaxClient(token="tok", device_id="dev")
