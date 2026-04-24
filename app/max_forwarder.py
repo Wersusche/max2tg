@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 
 PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+VIDEO_WS_UNAVAILABLE_CAPTION = "[видео недоступно через websocket]"
 
 
 def _header(msg: MaxMessage, sender_label: str, chat_label: str, is_dm: bool) -> str:
@@ -308,31 +309,25 @@ async def _send_attach(
 
     if atype == "VIDEO":
         video_id = _extract_video_id(attach)
+        preview_url = _first_http_url(attach.get("thumbnail"))
         data: bytes | None = None
-        download_video_attachment = getattr(client, "download_video_attachment", None)
+        preview_bytes: bytes | None = None
+        resolve_video_attachment = getattr(client, "resolve_video_attachment", None)
         if (
-            callable(download_video_attachment)
+            callable(resolve_video_attachment)
             and video_id not in (None, "")
             and chat_id not in (None, "")
             and message_id
         ):
-            data = await download_video_attachment(
+            outcome = await resolve_video_attachment(
                 video_id=video_id,
                 chat_id=chat_id,
                 message_id=message_id,
                 token=attach.get("token"),
+                preview_url=preview_url,
             )
-        else:
-            video_url = await _hydrate_video_attach_url(
-                attach,
-                client,
-                chat_id=chat_id,
-                message_id=message_id,
-            )
-            if not video_url:
-                video_url = _extract_attach_url(attach)
-            if video_url:
-                data = await client.download_file(video_url)
+            data = outcome.video_bytes
+            preview_bytes = outcome.preview_bytes
 
         if data:
             filename = attach.get("name") or (f"video-{video_id}.mp4" if video_id not in (None, "") else "video.mp4")
@@ -344,20 +339,18 @@ async def _send_attach(
                 reply_to_message_id=reply_to_message_id,
                 raise_bad_request=raise_bad_request,
             )
-        thumb = attach.get("thumbnail")
-        thumb_url = _first_http_url(thumb)
-        if thumb_url:
-            data = await client.download_file(thumb_url)
-            if data:
-                return await sender.send_photo(
-                    data,
-                    caption=f"{header_text}\n<i>[видео — превью]</i>",
-                    message_thread_id=message_thread_id,
-                    reply_to_message_id=reply_to_message_id,
-                    raise_bad_request=raise_bad_request,
-                )
+        if preview_bytes is None and preview_url:
+            preview_bytes = await client.download_file(preview_url)
+        if preview_bytes:
+            return await sender.send_photo(
+                preview_bytes,
+                caption=f"{header_text}\n<i>{escape(VIDEO_WS_UNAVAILABLE_CAPTION)}</i>",
+                message_thread_id=message_thread_id,
+                reply_to_message_id=reply_to_message_id,
+                raise_bad_request=raise_bad_request,
+            )
         return await sender.send(
-            f"{header_text}\n<i>[видео]</i>",
+            f"{header_text}\n<i>{escape(VIDEO_WS_UNAVAILABLE_CAPTION)}</i>",
             message_thread_id=message_thread_id,
             reply_to_message_id=reply_to_message_id,
             raise_bad_request=raise_bad_request,
