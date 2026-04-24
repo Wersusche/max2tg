@@ -701,6 +701,31 @@ class TestSendHelpers:
             }
         }
 
+    def test_extract_okru_player_data_parses_json_wrapper_with_embedded_html(self):
+        webpage = (
+            '{"html":"<div data-attributes=\\"{&quot;flashvars&quot;:{&quot;metadataUrl&quot;:&quot;https%3A%2F%2Fok.ru%2Fmetadata&quot;}}\\"></div>"}'
+        )
+
+        payload = MaxClient._extract_okru_player_data(webpage, video_id="14261721980814")
+
+        assert payload == {
+            "flashvars": {
+                "metadataUrl": "https%3A%2F%2Fok.ru%2Fmetadata",
+            }
+        }
+
+    def test_extract_okru_player_data_parses_json_wrapper_with_direct_flashvars(self):
+        webpage = '{"result":{"flashvars":{"metadataUrl":"https%3A%2F%2Fok.ru%2Fmetadata","location":"SEARCH"}}}'
+
+        payload = MaxClient._extract_okru_player_data(webpage, video_id="14261721980814")
+
+        assert payload == {
+            "flashvars": {
+                "metadataUrl": "https%3A%2F%2Fok.ru%2Fmetadata",
+                "location": "SEARCH",
+            }
+        }
+
     def test_extract_okru_movie_player_urls_supports_absolute_and_protocol_relative_links(self):
         webpage = (
             '<a href="https://wg31.ok.ru/web-api/video/moviePlayer/14261721980814#abc">video</a>'

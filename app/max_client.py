@@ -1211,7 +1211,7 @@ class MaxClient:
                 if nested_url not in seen_pages and nested_url not in page_variants:
                     page_variants.insert(queue_index, nested_url)
 
-            player = self._extract_okru_player_data(webpage)
+            player = self._extract_okru_player_data(webpage, video_id=video_id)
             if not isinstance(player, dict):
                 last_reason = f"player payload missing in {desktop_url}"
                 continue
@@ -1300,7 +1300,12 @@ class MaxClient:
         return None
 
     @staticmethod
-    def _extract_okru_player_data(webpage: str) -> dict | None:
+    def _extract_okru_player_data(webpage: str, video_id: str | None = None) -> dict | None:
+        direct_payload = MaxClient._parse_jsonish(webpage)
+        discovered_payload = MaxClient._find_okru_player_data(direct_payload, video_id=video_id)
+        if discovered_payload:
+            return discovered_payload
+
         candidate_values: list[str] = []
         for attr_name in ("data-options", "data-attributes"):
             attr_value = MaxClient._extract_html_attribute(webpage, attr_name)
@@ -1324,12 +1329,58 @@ class MaxClient:
 
         for raw_value in candidate_values:
             payload = MaxClient._parse_jsonish(raw_value)
-            if isinstance(payload, dict):
-                return payload
+            discovered_payload = MaxClient._find_okru_player_data(payload, video_id=video_id)
+            if discovered_payload:
+                return discovered_payload
 
         flashvars = MaxClient._extract_okru_flashvars(webpage)
         if flashvars:
             return {"flashvars": flashvars}
+
+        return None
+
+    @staticmethod
+    def _find_okru_player_data(payload: Any, *, video_id: str | None = None, _depth: int = 0) -> dict | None:
+        if _depth > 5:
+            return None
+
+        if isinstance(payload, dict):
+            flashvars = payload.get("flashvars")
+            if isinstance(flashvars, dict):
+                return {"flashvars": flashvars}
+            if isinstance(flashvars, str):
+                parsed_flashvars = MaxClient._parse_jsonish(flashvars)
+                if isinstance(parsed_flashvars, dict):
+                    return {"flashvars": parsed_flashvars}
+
+            if any(isinstance(payload.get(key), str) and payload.get(key) for key in ("metadata", "metadataUrl")):
+                return {"flashvars": {key: payload[key] for key in ("metadata", "metadataUrl", "location", "url") if isinstance(payload.get(key), str) and payload.get(key)}}
+
+            for key in ("player", "moviePlayer", "html", "content", "data", "payload", "result", "widget"):
+                if key in payload:
+                    discovered = MaxClient._find_okru_player_data(payload[key], video_id=video_id, _depth=_depth + 1)
+                    if discovered:
+                        return discovered
+
+            for nested in payload.values():
+                discovered = MaxClient._find_okru_player_data(nested, video_id=video_id, _depth=_depth + 1)
+                if discovered:
+                    return discovered
+            return None
+
+        if isinstance(payload, list):
+            for item in payload:
+                discovered = MaxClient._find_okru_player_data(item, video_id=video_id, _depth=_depth + 1)
+                if discovered:
+                    return discovered
+            return None
+
+        if isinstance(payload, str):
+            if not payload:
+                return None
+            if video_id and video_id not in payload and "flashvars" not in payload and "metadataUrl" not in payload and "data-options" not in payload and "data-attributes" not in payload:
+                return None
+            return MaxClient._extract_okru_player_data(payload, video_id=video_id)
 
         return None
 
