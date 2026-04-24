@@ -52,6 +52,9 @@ class _FakeSession:
         self.calls.append((url, kwargs))
         return self._next_response()
 
+    async def close(self):
+        self.closed = True
+
 
 # ---------------------------------------------------------------------------
 # OpCode enum
@@ -574,9 +577,9 @@ class TestSendHelpers:
     async def test_download_file_uses_authorization_for_max_media_urls(self):
         client = MaxClient(token="tok", device_id="dev")
         session = _FakeSession(_FakeResponse(status=200, body=b"voice-bytes"))
-        client._session = session
 
-        payload = await client.download_file("https://maxvd526.okcdn.ru/voice.ogg")
+        with patch("app.max_client.aiohttp.ClientSession", return_value=session):
+            payload = await client.download_file("https://maxvd526.okcdn.ru/voice.ogg")
 
         assert payload == b"voice-bytes"
         _, kwargs = session.calls[0]
@@ -592,9 +595,9 @@ class TestSendHelpers:
                 _FakeResponse(status=200, body=b"voice-bytes"),
             ]
         )
-        client._session = session
 
-        result = await client.download_file_result("https://maxvd526.okcdn.ru/voice.ogg?expires=1&sig=abc")
+        with patch("app.max_client.aiohttp.ClientSession", return_value=session):
+            result = await client.download_file_result("https://maxvd526.okcdn.ru/voice.ogg?expires=1&sig=abc")
 
         assert result.data == b"voice-bytes"
         assert result.status == 200
@@ -613,9 +616,9 @@ class TestSendHelpers:
     async def test_download_file_skips_authorization_for_external_urls(self):
         client = MaxClient(token="tok", device_id="dev")
         session = _FakeSession(_FakeResponse(status=200, body=b"file-bytes"))
-        client._session = session
 
-        payload = await client.download_file("https://example.com/file.bin")
+        with patch("app.max_client.aiohttp.ClientSession", return_value=session):
+            payload = await client.download_file("https://example.com/file.bin")
 
         assert payload == b"file-bytes"
         _, kwargs = session.calls[0]
