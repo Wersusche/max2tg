@@ -307,27 +307,43 @@ async def _send_attach(
         )
 
     if atype == "VIDEO":
-        video_url = await _hydrate_video_attach_url(
-            attach,
-            client,
-            chat_id=chat_id,
-            message_id=message_id,
-        )
-        if not video_url:
-            video_url = _extract_attach_url(attach)
-        if video_url:
-            data = await client.download_file(video_url)
-            if data:
-                video_id = _extract_video_id(attach)
-                filename = attach.get("name") or (f"video-{video_id}.mp4" if video_id not in (None, "") else "video.mp4")
-                return await sender.send_video(
-                    data,
-                    caption=header_text,
-                    filename=filename,
-                    message_thread_id=message_thread_id,
-                    reply_to_message_id=reply_to_message_id,
-                    raise_bad_request=raise_bad_request,
-                )
+        video_id = _extract_video_id(attach)
+        data: bytes | None = None
+        download_video_attachment = getattr(client, "download_video_attachment", None)
+        if (
+            callable(download_video_attachment)
+            and video_id not in (None, "")
+            and chat_id not in (None, "")
+            and message_id
+        ):
+            data = await download_video_attachment(
+                video_id=video_id,
+                chat_id=chat_id,
+                message_id=message_id,
+                token=attach.get("token"),
+            )
+        else:
+            video_url = await _hydrate_video_attach_url(
+                attach,
+                client,
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+            if not video_url:
+                video_url = _extract_attach_url(attach)
+            if video_url:
+                data = await client.download_file(video_url)
+
+        if data:
+            filename = attach.get("name") or (f"video-{video_id}.mp4" if video_id not in (None, "") else "video.mp4")
+            return await sender.send_video(
+                data,
+                caption=header_text,
+                filename=filename,
+                message_thread_id=message_thread_id,
+                reply_to_message_id=reply_to_message_id,
+                raise_bad_request=raise_bad_request,
+            )
         thumb = attach.get("thumbnail")
         thumb_url = _first_http_url(thumb)
         if thumb_url:
