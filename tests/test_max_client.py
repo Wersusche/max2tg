@@ -726,6 +726,17 @@ class TestSendHelpers:
             }
         }
 
+    def test_extract_okru_player_data_accepts_direct_metadata_json(self):
+        webpage = '{"movie":{"title":"clip"},"videos":[{"name":"hd","url":"https://cdn.example/video-720.mp4"}]}'
+
+        payload = MaxClient._extract_okru_player_data(webpage, video_id="14261721980814")
+
+        assert payload == {
+            "flashvars": {
+                "metadata": '{"movie": {"title": "clip"}, "videos": [{"name": "hd", "url": "https://cdn.example/video-720.mp4"}]}'
+            }
+        }
+
     def test_extract_okru_movie_player_urls_supports_absolute_and_protocol_relative_links(self):
         webpage = (
             '<a href="https://wg31.ok.ru/web-api/video/moviePlayer/14261721980814#abc">video</a>'
@@ -792,6 +803,23 @@ class TestSendHelpers:
             "https://ok.ru/video/14261721980814",
             "https://wg31.ok.ru/web-api/video/moviePlayer/14261721980814",
         ]
+
+    @pytest.mark.asyncio
+    async def test_resolve_okru_desktop_video_url_accepts_direct_metadata_from_movie_player(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client._fetch_text_page = AsyncMock(
+            side_effect=[
+                None,
+                None,
+                '{"movie":{"title":"clip"},"videos":[{"name":"mobile","url":"https://cdn.example/video-240.mp4"},{"name":"hd","url":"https://cdn.example/video-720.mp4"}]}',
+            ]
+        )
+        client._fetch_json_page = AsyncMock()
+
+        payload = await client._resolve_okru_desktop_video_url("https://m.ok.ru/video/14261721980814")
+
+        assert payload == "https://cdn.example/video-720.mp4"
+        client._fetch_json_page.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_download_file_uses_authorization_for_max_media_urls(self):

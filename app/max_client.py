@@ -1345,6 +1345,9 @@ class MaxClient:
             return None
 
         if isinstance(payload, dict):
+            if MaxClient._looks_like_okru_metadata(payload):
+                return {"flashvars": {"metadata": json.dumps(payload, ensure_ascii=False)}}
+
             flashvars = payload.get("flashvars")
             if isinstance(flashvars, dict):
                 return {"flashvars": flashvars}
@@ -1383,6 +1386,27 @@ class MaxClient:
             return MaxClient._extract_okru_player_data(payload, video_id=video_id)
 
         return None
+
+    @staticmethod
+    def _looks_like_okru_metadata(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        if isinstance(payload.get("movie"), dict):
+            return True
+        if isinstance(payload.get("videos"), list):
+            return True
+        return any(
+            isinstance(payload.get(key), str) and payload.get(key)
+            for key in (
+                "hlsManifestUrl",
+                "ondemandHls",
+                "ondemandDash",
+                "metadataWebmUrl",
+                "metadataEmbedded",
+                "hlsMasterPlaylistUrl",
+                "rtmpUrl",
+            )
+        )
 
     @staticmethod
     def _extract_okru_flashvars(text: str) -> dict | None:
