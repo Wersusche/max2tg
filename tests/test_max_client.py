@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
-from app.max_client import DownloadResult, MaxClient, MaxMessage, OpCode, _HTTP_HEADERS
+from app.max_client import DownloadResult, MaxClient, MaxMessage, OpCode, VideoInfoLookupResult, _HTTP_HEADERS
 
 
 class _FakeResponse:
@@ -534,6 +534,23 @@ class TestSendHelpers:
         assert kwargs["headers"]["Accept"] == "application/json"
 
     @pytest.mark.asyncio
+    async def test_fetch_video_info_lookup_classifies_verify_token_as_unauthorized(self):
+        client = MaxClient(token="web-session-token", device_id="dev")
+        session = _FakeSession(
+            _FakeResponse(
+                status=401,
+                text='{"code":"verify.token","message":"Invalid access_token"}',
+            )
+        )
+        client._session = session
+
+        result = await client._fetch_video_info_lookup("video-token")
+
+        assert result.info == {}
+        assert result.status == 401
+        assert result.failure_reason == "http_video_info_unauthorized"
+
+    @pytest.mark.asyncio
     async def test_fetch_file_download_url_uses_websocket_opcode_and_payload(self):
         client = MaxClient(token="tok", device_id="dev")
         client.cmd = AsyncMock(return_value={"url": "https://example.com/report.pdf"})
@@ -619,17 +636,19 @@ class TestSendHelpers:
     @pytest.mark.asyncio
     async def test_resolve_video_attachment_uses_documented_http_before_websocket(self):
         client = MaxClient(token="tok", device_id="dev")
-        client.fetch_video_info = AsyncMock(
-            return_value={
-                "urls": {
-                    "hls": "https://cdn.example/playlist.m3u8",
-                    "mp4_360": "https://cdn.example/video-360.mp4",
-                    "mp4_1080": "https://cdn.example/video-1080.mp4",
-                },
-                "width": 1920,
-                "height": 1080,
-                "duration": 34,
-            }
+        client._fetch_video_info_lookup = AsyncMock(
+            return_value=VideoInfoLookupResult(
+                info={
+                    "urls": {
+                        "hls": "https://cdn.example/playlist.m3u8",
+                        "mp4_360": "https://cdn.example/video-360.mp4",
+                        "mp4_1080": "https://cdn.example/video-1080.mp4",
+                    },
+                    "width": 1920,
+                    "height": 1080,
+                    "duration": 34,
+                }
+            )
         )
         client.cmd = AsyncMock(return_value={"MP4_720": "https://example.com/ws.mp4"})
         client.download_file_result = AsyncMock(
@@ -657,7 +676,7 @@ class TestSendHelpers:
     @pytest.mark.asyncio
     async def test_resolve_video_attachment_falls_back_to_websocket_when_documented_urls_are_null(self):
         client = MaxClient(token="tok", device_id="dev")
-        client.fetch_video_info = AsyncMock(return_value={"urls": None})
+        client._fetch_video_info_lookup = AsyncMock(return_value=VideoInfoLookupResult(info={"urls": None}))
         client.cmd = AsyncMock(return_value={"MP4_720": "https://example.com/ws-video.mp4"})
         client.download_file_result = AsyncMock(
             return_value=DownloadResult(
@@ -684,7 +703,9 @@ class TestSendHelpers:
     @pytest.mark.asyncio
     async def test_resolve_video_attachment_marks_documented_non_playable_when_no_fallback_video(self):
         client = MaxClient(token="tok", device_id="dev")
-        client.fetch_video_info = AsyncMock(return_value={"urls": {"hls": "https://cdn.example/playlist.m3u8"}})
+        client._fetch_video_info_lookup = AsyncMock(
+            return_value=VideoInfoLookupResult(info={"urls": {"hls": "https://cdn.example/playlist.m3u8"}})
+        )
         client.cmd = AsyncMock(return_value={})
         client.download_file_result = AsyncMock(
             return_value=DownloadResult(data=b"preview-bytes", status=200, used_authorization=False, content_type="image/jpeg")
@@ -705,9 +726,66 @@ class TestSendHelpers:
         assert outcome.attempted_urls == []
 
     @pytest.mark.asyncio
+    async def test_resolve_video_attachment_uses_okru_metadata_id_from_signed_and_thumbnail_urls(self):
+        client = MaxClient(token="tok", device_id="dev")
+        client._fetch_video_info_lookup = AsyncMock(
+            return_value=VideoInfoLookupResult(failure_reason="http_video_info_unauthorized", status=401)
+        )
+        client.cmd = AsyncMock(
+            side_effect=[
+                {
+                    "EXTERNAL": "https://m.ok.ru/video/14350987583374",
+                    "cache": True,
+                    "MP4_360": (
+                        "https://maxvd367.okcdn.ru/?expires=1&type=1&sig=bad-a"
+                        "&id=14266960579214&scl=1"
+                    ),
+                },
+                {
+                    "EXTERNAL": "https://m.ok.ru/video/14350987583374",
+                    "cache": True,
+                    "MP4_360": (
+                        "https://maxvd367.okcdn.ru/?expires=1&type=1&sig=bad-b"
+                        "&id=14266960579214&scl=1"
+                    ),
+                },
+            ]
+        )
+        client._resolve_okru_metadata_video_url = AsyncMock(return_value="https://cdn.example/okru-720.mp4")
+        client.download_file_result = AsyncMock(
+            side_effect=[
+                DownloadResult(status=400, used_authorization=False),
+                DownloadResult(data=b"<html>guest</html>", status=200, used_authorization=False, content_type="text/html;charset=UTF-8"),
+                DownloadResult(status=400, used_authorization=False),
+                DownloadResult(
+                    data=b"\x00\x00\x00\x18ftypisomvideo",
+                    status=200,
+                    used_authorization=False,
+                    content_type="video/mp4",
+                ),
+            ]
+        )
+
+        outcome = await client.resolve_video_attachment(
+            video_id=14350987583374,
+            chat_id=13908693,
+            message_id="116474103407474971",
+            token="attach-token",
+            preview_url=(
+                "https://iv.okcdn.ru/getImage?disableStub=true&type=PREPARE"
+                "&url=https%3A%2F%2Fiv.okcdn.ru%2FvideoPreview%3Fid%3D14266960579214%26type%3D39"
+            ),
+        )
+
+        assert outcome.video_bytes == b"\x00\x00\x00\x18ftypisomvideo"
+        assert outcome.source == "okru_metadata"
+        client._resolve_okru_metadata_video_url.assert_awaited_once_with(["14266960579214", "14350987583374"])
+        assert outcome.attempted_urls[-1] == "https://cdn.example/okru-720.mp4"
+
+    @pytest.mark.asyncio
     async def test_download_video_attachment_tries_multiple_candidates_until_video_payload(self):
         client = MaxClient(token="tok", device_id="dev")
-        client.fetch_video_info = AsyncMock(return_value={})
+        client._fetch_video_info_lookup = AsyncMock(return_value=VideoInfoLookupResult(failure_reason="http_video_info_error"))
         client.cmd = AsyncMock(
             return_value={
                 "MP4_240": "https://example.com/bad.mp4",
@@ -736,7 +814,7 @@ class TestSendHelpers:
     @pytest.mark.asyncio
     async def test_resolve_video_attachment_marks_signed_mp4_400_when_websocket_only_urls_fail(self):
         client = MaxClient(token="tok", device_id="dev")
-        client.fetch_video_info = AsyncMock(return_value={})
+        client._fetch_video_info_lookup = AsyncMock(return_value=VideoInfoLookupResult(failure_reason="http_video_info_error"))
         client.cmd = AsyncMock(
             side_effect=[
                 {"MP4_240": "https://maxvd692.okcdn.ru/?expires=1&type=0&sig=bad-a", "cache": True},
@@ -781,6 +859,7 @@ class TestSendHelpers:
                 "cache": True,
             }
         )
+        client._resolve_okru_metadata_video_url = AsyncMock(return_value=None)
         client.download_file_result = AsyncMock(
             side_effect=[
                 DownloadResult(
@@ -804,14 +883,15 @@ class TestSendHelpers:
         )
 
         assert outcome.video_bytes is None
-        assert outcome.failure_reason == "ws_external_ok_guest_page"
+        assert outcome.failure_reason == "okru_metadata_no_playable_url"
         assert outcome.preview_bytes == b"preview-bytes"
         assert outcome.attempted_urls == ["https://m.ok.ru/video/123"]
+        client._resolve_okru_metadata_video_url.assert_awaited_once_with(["123"])
 
     @pytest.mark.asyncio
     async def test_resolve_video_attachment_marks_ws_request_error_when_websocket_request_crashes(self):
         client = MaxClient(token="tok", device_id="dev")
-        client.fetch_video_info = AsyncMock(return_value={})
+        client._fetch_video_info_lookup = AsyncMock(return_value=VideoInfoLookupResult(failure_reason="http_video_info_error"))
         client.cmd = AsyncMock(side_effect=RuntimeError("boom"))
         client.download_file_result = AsyncMock(
             return_value=DownloadResult(data=b"preview-bytes", status=200, used_authorization=False, content_type="image/jpeg")
@@ -838,7 +918,7 @@ class TestSendHelpers:
     @pytest.mark.asyncio
     async def test_download_video_attachment_retries_websocket_with_attach_token_after_bad_candidates(self):
         client = MaxClient(token="auth-token", device_id="dev")
-        client.fetch_video_info = AsyncMock(return_value={})
+        client._fetch_video_info_lookup = AsyncMock(return_value=VideoInfoLookupResult(failure_reason="http_video_info_error"))
         client.cmd = AsyncMock(
             side_effect=[
                 {
@@ -1065,6 +1145,20 @@ class TestSendHelpers:
             "https://maxvd692.okcdn.ru/?expires=1&type=2&sig=ok",
         ]
 
+    def test_extract_okru_video_id_candidates_prefers_query_and_nested_ids(self):
+        payload = {
+            "EXTERNAL": "https://m.ok.ru/video/14350987583374",
+            "MP4_360": "https://maxvd367.okcdn.ru/?expires=1&type=1&sig=bad&id=14266960579214&scl=1",
+            "thumbnail": (
+                "https://iv.okcdn.ru/getImage?url="
+                "https%3A%2F%2Fiv.okcdn.ru%2FvideoPreview%3Fid%3D14266960579214%26type%3D39"
+            ),
+        }
+
+        ids = MaxClient._extract_okru_video_id_candidates(payload)
+
+        assert ids == ["14266960579214", "14350987583374"]
+
     def test_extract_video_url_candidates_reports_non_url_cache_values(self):
         payload = {
             "MP4_240": "https://cdn.example/video-240.mp4",
@@ -1185,6 +1279,32 @@ class TestSendHelpers:
         assert "Referer" not in first_kwargs["headers"]
         assert "Origin" not in second_kwargs["headers"]
         assert "Referer" not in second_kwargs["headers"]
+
+    @pytest.mark.asyncio
+    async def test_download_file_result_retries_signed_max_media_with_range(self):
+        client = MaxClient(token="tok", device_id="dev")
+        session = _FakeSession(
+            [
+                _FakeResponse(status=400, text="bad signed request"),
+                _FakeResponse(status=400, text="still bad"),
+                _FakeResponse(status=206, body=b"\x00\x00\x00\x18ftypisomvideo", headers={"Content-Type": "video/mp4"}),
+            ]
+        )
+
+        with patch("app.max_client.aiohttp.ClientSession", return_value=session):
+            result = await client.download_file_result("https://maxvd526.okcdn.ru/video.mp4?expires=1&sig=abc")
+
+        assert result.data == b"\x00\x00\x00\x18ftypisomvideo"
+        assert result.status == 206
+        assert result.used_authorization is False
+        assert len(session.calls) == 3
+        _, first_kwargs = session.calls[0]
+        _, second_kwargs = session.calls[1]
+        _, third_kwargs = session.calls[2]
+        assert first_kwargs["headers"]["Authorization"] == "tok"
+        assert "Authorization" not in second_kwargs["headers"]
+        assert "Authorization" not in third_kwargs["headers"]
+        assert third_kwargs["headers"]["Range"] == "bytes=0-"
 
     @pytest.mark.asyncio
     async def test_download_file_skips_authorization_for_external_urls(self):

@@ -83,9 +83,11 @@ _DOCUMENT_READY_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0)
 _MAX_MEDIA_HOST_SUFFIXES = ("okcdn.ru", "mycdn.me", "max.ru", "oneme.ru")
 _SIGNED_MEDIA_QUERY_KEYS = frozenset({"expires", "sig"})
 _VIDEO_FAILURE_REASON_PRIORITY = (
+    "okru_metadata_no_playable_url",
     "ws_external_ok_guest_page",
     "ws_signed_mp4_400",
     "ws_request_error",
+    "http_video_info_unauthorized",
     "http_video_info_error",
     "http_video_info_no_urls",
     "http_video_info_non_playable",
@@ -146,6 +148,13 @@ class VideoDownloadOutcome:
     attempted_urls: list[str] = field(default_factory=list)
     preview_bytes: bytes | None = None
     preview_url: str | None = None
+
+
+@dataclass
+class VideoInfoLookupResult:
+    info: dict = field(default_factory=dict)
+    failure_reason: str | None = None
+    status: int | None = None
 
 
 class MaxClient:
@@ -666,7 +675,7 @@ class MaxClient:
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=120),
             ) as resp:
-                if resp.status == 200:
+                if resp.status in {200, 206}:
                     data = await resp.read()
                     return (
                         DownloadResult(
@@ -764,8 +773,11 @@ class MaxClient:
 
     async def fetch_video_info(self, video_token: str) -> dict:
         """Fetch video metadata from the documented platform API."""
+        return (await self._fetch_video_info_lookup(video_token)).info
+
+    async def _fetch_video_info_lookup(self, video_token: str) -> VideoInfoLookupResult:
         if not isinstance(video_token, str) or not video_token:
-            return {}
+            return VideoInfoLookupResult(failure_reason="http_video_info_error")
 
         session = getattr(self, "_session", None)
         close_after = False
@@ -782,20 +794,26 @@ class MaxClient:
             ) as resp:
                 if resp.status == 200:
                     payload = await resp.json(content_type=None)
-                    return self._normalize_documented_video_info(payload)
+                    return VideoInfoLookupResult(info=self._normalize_documented_video_info(payload), status=resp.status)
                 body = await resp.text(errors="ignore")
-                log.warning(
-                    "Fetch video info failed token=%s - HTTP %d: %s",
+                error_payload = self._parse_jsonish(body)
+                failure_reason = self._classify_video_info_failure(resp.status, error_payload if isinstance(error_payload, dict) else body)
+                log_method = log.info if failure_reason == "http_video_info_unauthorized" else log.warning
+                log_method(
+                    "Fetch video info failed token=%s - HTTP %d reason=%s: %s",
                     video_token[:12],
                     resp.status,
+                    failure_reason,
                     body[:500],
                 )
+                return VideoInfoLookupResult(failure_reason=failure_reason, status=resp.status)
         except Exception:
             log.exception("Fetch video info error token=%s", video_token[:12])
+            return VideoInfoLookupResult(failure_reason="http_video_info_error")
         finally:
             if close_after:
                 await session.close()
-        return {}
+        return VideoInfoLookupResult(failure_reason="http_video_info_error")
 
     async def fetch_file_download_url(self, *, file_id: Any, chat_id: Any, message_id: str) -> str | None:
         """Resolve a downloadable file URL via the MAX WebSocket protocol."""
@@ -986,14 +1004,18 @@ class MaxClient:
         seen_urls: set[str] = set()
         failure_reasons: set[str] = set()
         candidate_index = 0
+        okru_id_context: list[Any] = [outcome.preview_url]
 
         if isinstance(token, str) and token:
-            video_info = await self.fetch_video_info(token)
+            video_info_lookup = await self._fetch_video_info_lookup(token)
+            video_info = video_info_lookup.info
             if not video_info:
-                failure_reasons.add("http_video_info_error")
-                log.info("Documented video lookup returned no info token=%s", token[:12])
+                failure_reason = video_info_lookup.failure_reason or "http_video_info_error"
+                failure_reasons.add(failure_reason)
+                log.info("Documented video lookup returned no info token=%s reason=%s", token[:12], failure_reason)
             else:
                 urls_payload = video_info.get("urls")
+                okru_id_context.append(urls_payload)
                 if urls_payload in (None, [], {}):
                     failure_reasons.add("http_video_info_no_urls")
                     log.info(
@@ -1024,6 +1046,7 @@ class MaxClient:
                         if url in seen_urls:
                             continue
                         seen_urls.add(url)
+                        okru_id_context.append(url)
                         outcome.attempted_urls.append(url)
                         candidate_index += 1
 
@@ -1097,6 +1120,7 @@ class MaxClient:
                     f"video_download_{normalized_video_id}_{attempt_index}.json",
                     response_payload,
                 )
+            okru_id_context.append(response_payload)
 
             cmd_error = self._extract_cmd_error(response_payload)
             if cmd_error is not None:
@@ -1117,6 +1141,7 @@ class MaxClient:
                 if url in seen_urls:
                     continue
                 seen_urls.add(url)
+                okru_id_context.append(url)
                 attempt_urls.append(url)
                 outcome.attempted_urls.append(url)
 
@@ -1140,15 +1165,17 @@ class MaxClient:
                 candidate_index += 1
                 result = await self.download_file_result(url)
                 if self._is_video_download_result(result):
+                    source = "signed_mp4" if self._is_signed_max_media_url(url) else "websocket_mp4"
                     log.info(
-                        "Downloaded playable video source=websocket_mp4 candidate=%d video_id=%s content_type=%s bytes=%d",
+                        "Downloaded playable video source=%s candidate=%d video_id=%s content_type=%s bytes=%d",
+                        source,
                         candidate_index,
                         normalized_video_id,
                         result.content_type,
                         len(result.data or b""),
                     )
                     outcome.video_bytes = result.data
-                    outcome.source = "websocket_mp4"
+                    outcome.source = source
                     return outcome
 
                 failure_reason = self._classify_video_download_failure_reason(
@@ -1167,6 +1194,52 @@ class MaxClient:
                         result.content_type,
                         len(result.data),
                     )
+
+        okru_ids = self._extract_okru_video_id_candidates(okru_id_context)
+        if okru_ids:
+            log.info(
+                "Trying OK.ru metadata fallback source=okru_metadata video_id=%s okru_ids=%s",
+                normalized_video_id,
+                okru_ids,
+            )
+            metadata_url = await self._resolve_okru_metadata_video_url(okru_ids)
+            if metadata_url and metadata_url not in seen_urls:
+                seen_urls.add(metadata_url)
+                outcome.attempted_urls.append(metadata_url)
+                candidate_index += 1
+
+                result = await self.download_file_result(metadata_url)
+                if self._is_video_download_result(result):
+                    log.info(
+                        "Downloaded playable video source=okru_metadata candidate=%d video_id=%s okru_url=%s content_type=%s bytes=%d",
+                        candidate_index,
+                        normalized_video_id,
+                        metadata_url[:120],
+                        result.content_type,
+                        len(result.data or b""),
+                    )
+                    outcome.video_bytes = result.data
+                    outcome.source = "okru_metadata"
+                    return outcome
+
+                failure_reason = self._classify_video_download_failure_reason(
+                    metadata_url,
+                    result,
+                    video_id=normalized_video_id,
+                )
+                if failure_reason:
+                    failure_reasons.add(failure_reason)
+
+                if result.data is not None:
+                    log.warning(
+                        "OK.ru metadata candidate=%d for video_id=%s downloaded non-video payload content_type=%s bytes=%d",
+                        candidate_index,
+                        normalized_video_id,
+                        result.content_type,
+                        len(result.data),
+                    )
+
+            failure_reasons.add("okru_metadata_no_playable_url")
 
         if not failure_reasons:
             failure_reasons.add("ws_no_playable_url")
@@ -1317,14 +1390,34 @@ class MaxClient:
                         retry_result.used_authorization,
                     )
                     return retry_result
+
+                range_headers = dict(retry_headers)
+                range_headers["Range"] = "bytes=0-"
+                range_result, range_body = await self._download_file_once(
+                    session,
+                    url,
+                    range_headers,
+                    used_authorization=False,
+                )
+                if range_result.data is not None:
+                    log.info(
+                        "Downloaded %s (%d bytes, authorized=%s, range=%s)",
+                        url[:120],
+                        len(range_result.data),
+                        range_result.used_authorization,
+                        range_headers["Range"],
+                    )
+                    return range_result
+
                 log.warning(
-                    "Download failed %s - authorized HTTP %s, anonymous HTTP %s: %s",
+                    "Download failed %s - authorized HTTP %s, anonymous HTTP %s, range HTTP %s: %s",
                     url[:120],
                     result.status,
                     retry_result.status,
-                    retry_body or body,
+                    range_result.status,
+                    range_body or retry_body or body,
                 )
-                return retry_result
+                return range_result
 
             log.warning(
                 "Download failed %s - HTTP %s (authorized=%s): %s",
@@ -1460,6 +1553,24 @@ class MaxClient:
         return None
 
     @staticmethod
+    def _classify_video_info_failure(status: int | None, payload: Any) -> str:
+        if status in {401, 403}:
+            code = ""
+            message = ""
+            if isinstance(payload, dict):
+                code = str(payload.get("code") or payload.get("error") or "")
+                message = str(payload.get("message") or payload.get("error_description") or "")
+            elif isinstance(payload, str):
+                message = payload
+
+            lowered = f"{code} {message}".lower()
+            if "verify.token" in lowered or "invalid access_token" in lowered or "access_token" in lowered:
+                return "http_video_info_unauthorized"
+            return "http_video_info_unauthorized"
+
+        return "http_video_info_error"
+
+    @staticmethod
     def _normalize_documented_video_info(payload: Any) -> dict:
         if not isinstance(payload, dict):
             return {}
@@ -1575,6 +1686,84 @@ class MaxClient:
     def _extract_documented_video_http_urls(payload: Any) -> list[str]:
         urls, _ = MaxClient._extract_documented_video_url_candidates(payload)
         return urls
+
+    @staticmethod
+    def _extract_okru_video_id_candidates(payload: Any) -> list[str]:
+        candidates: list[tuple[int, int, str]] = []
+        seen: set[str] = set()
+
+        def _register(video_id: Any, priority: int) -> None:
+            if not isinstance(video_id, str):
+                video_id = str(video_id) if video_id is not None else ""
+            if not re.fullmatch(r"[\d-]+", video_id) or video_id in seen:
+                return
+            seen.add(video_id)
+            candidates.append((priority, len(candidates), video_id))
+
+        def _url_variants(raw_value: str) -> list[str]:
+            variants: list[str] = []
+            seen_variants: set[str] = set()
+
+            def _add(value: str | None) -> None:
+                if not isinstance(value, str):
+                    return
+                normalized = html.unescape(value).strip().replace("\\/", "/")
+                if not normalized or normalized in seen_variants:
+                    return
+                seen_variants.add(normalized)
+                variants.append(normalized)
+
+            _add(raw_value)
+            for value in list(variants):
+                _add(unquote(value))
+            return variants
+
+        def _collect_url(raw_value: str, *, path_priority: int, query_priority: int, depth: int) -> None:
+            if depth > 3:
+                return
+
+            for value in _url_variants(raw_value):
+                normalized = value
+                if normalized.startswith("//"):
+                    normalized = f"https:{normalized}"
+                elif normalized.startswith(("ok.ru/", "m.ok.ru/", "mobile.ok.ru/", "www.ok.ru/")):
+                    normalized = f"https://{normalized}"
+
+                parsed = urlparse(normalized)
+                query_values = parse_qsl(parsed.query, keep_blank_values=True)
+                for key, query_value in query_values:
+                    if key in {"id", "videoId", "mvId", "st.mvId"}:
+                        _register(query_value, query_priority)
+                    if query_value:
+                        _collect_url(query_value, path_priority=query_priority, query_priority=query_priority, depth=depth + 1)
+
+                host = (parsed.hostname or "").lower().rstrip(".")
+                if host in {"ok.ru", "m.ok.ru", "mobile.ok.ru", "www.ok.ru"}:
+                    path_id = MaxClient._extract_okru_video_id(normalized)
+                    if path_id:
+                        _register(path_id, path_priority)
+
+        def _collect(value: Any, *, path: str = "") -> None:
+            if isinstance(value, str):
+                path_upper = path.upper()
+                path_priority = 2 if "EXTERNAL" in path_upper else 1
+                _collect_url(value, path_priority=path_priority, query_priority=0, depth=0)
+                return
+
+            if isinstance(value, dict):
+                for key, nested in value.items():
+                    next_path = f"{path}.{key}" if path else str(key)
+                    _collect(nested, path=next_path)
+                return
+
+            if isinstance(value, list):
+                for index, item in enumerate(value):
+                    next_path = f"{path}[{index}]" if path else f"[{index}]"
+                    _collect(item, path=next_path)
+
+        _collect(payload)
+        candidates.sort()
+        return [video_id for _, _, video_id in candidates]
 
     @staticmethod
     def _extract_video_url_candidates(payload: Any) -> tuple[list[str], list[str]]:
@@ -1728,6 +1917,20 @@ class MaxClient:
             )
             return None
         return await self._resolve_redirect_url(video_src)
+
+    async def _resolve_okru_metadata_video_url(self, okru_ids: list[str]) -> str | None:
+        seen_ids: set[str] = set()
+        for okru_id in okru_ids:
+            if okru_id in seen_ids:
+                continue
+            seen_ids.add(okru_id)
+
+            url = await self._resolve_okru_desktop_video_url(f"https://ok.ru/video/{okru_id}")
+            if url:
+                log.info("Resolved OK.ru metadata video URL for okru_id=%s", okru_id)
+                return url
+
+        return None
 
     async def _resolve_okru_desktop_video_url(self, page_url: str, *, seed_urls: list[str] | None = None) -> str | None:
         video_id = self._extract_okru_video_id(page_url)
