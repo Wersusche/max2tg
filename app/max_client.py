@@ -86,8 +86,14 @@ _VIDEO_FAILURE_REASON_PRIORITY = (
     "ws_external_ok_guest_page",
     "ws_signed_mp4_400",
     "ws_request_error",
+    "http_video_info_error",
+    "http_video_info_no_urls",
+    "http_video_info_non_playable",
     "ws_no_playable_url",
 )
+_DIRECT_VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".webm", ".matroska")
+_VIDEO_MANIFEST_EXTENSIONS = (".m3u8", ".mpd")
+_HTML_PAGE_EXTENSIONS = (".htm", ".html", ".shtml", ".xhtml", ".php", ".asp", ".aspx", ".jsp")
 
 
 class OpCode(IntEnum):
@@ -135,6 +141,7 @@ class DownloadResult:
 class VideoDownloadOutcome:
     video_bytes: bytes | None = None
     failure_reason: str | None = None
+    source: str | None = None
     attempted_payloads: list[dict[str, Any]] = field(default_factory=list)
     attempted_urls: list[str] = field(default_factory=list)
     preview_bytes: bytes | None = None
@@ -755,6 +762,41 @@ class MaxClient:
                 await session.close()
         return {}
 
+    async def fetch_video_info(self, video_token: str) -> dict:
+        """Fetch video metadata from the documented platform API."""
+        if not isinstance(video_token, str) or not video_token:
+            return {}
+
+        session = getattr(self, "_session", None)
+        close_after = False
+        if session is None or session.closed:
+            session = aiohttp.ClientSession(headers=_BROWSER_HEADERS)
+            close_after = True
+
+        request_url = f"{_PLATFORM_API_BASE_URL}/videos/{quote(video_token, safe='')}"
+        try:
+            async with session.get(
+                request_url,
+                headers=self._platform_api_headers(),
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    payload = await resp.json(content_type=None)
+                    return self._normalize_documented_video_info(payload)
+                body = await resp.text(errors="ignore")
+                log.warning(
+                    "Fetch video info failed token=%s - HTTP %d: %s",
+                    video_token[:12],
+                    resp.status,
+                    body[:500],
+                )
+        except Exception:
+            log.exception("Fetch video info error token=%s", video_token[:12])
+        finally:
+            if close_after:
+                await session.close()
+        return {}
+
     async def fetch_file_download_url(self, *, file_id: Any, chat_id: Any, message_id: str) -> str | None:
         """Resolve a downloadable file URL via the MAX WebSocket protocol."""
         if file_id in (None, "") or chat_id in (None, "") or not message_id:
@@ -941,8 +983,76 @@ class MaxClient:
         outcome = VideoDownloadOutcome(
             preview_url=preview_url if isinstance(preview_url, str) and preview_url.startswith("http") else None
         )
+        seen_urls: set[str] = set()
+        failure_reasons: set[str] = set()
+        candidate_index = 0
+
+        if isinstance(token, str) and token:
+            video_info = await self.fetch_video_info(token)
+            if not video_info:
+                failure_reasons.add("http_video_info_error")
+                log.info("Documented video lookup returned no info token=%s", token[:12])
+            else:
+                urls_payload = video_info.get("urls")
+                if urls_payload in (None, [], {}):
+                    failure_reasons.add("http_video_info_no_urls")
+                    log.info(
+                        "Documented video lookup returned no URLs token=%s width=%s height=%s duration=%s",
+                        token[:12],
+                        video_info.get("width"),
+                        video_info.get("height"),
+                        video_info.get("duration"),
+                    )
+                else:
+                    http_urls, dropped_paths = self._extract_documented_video_url_candidates(urls_payload)
+                    if not http_urls:
+                        failure_reasons.add("http_video_info_non_playable")
+                        log.info(
+                            "Documented video lookup returned no direct playable URL token=%s dropped_non_playable=%s",
+                            token[:12],
+                            dropped_paths,
+                        )
+                    else:
+                        log.info(
+                            "Trying %d video URL(s) from source=documented_http token=%s dropped_non_playable=%s",
+                            len(http_urls),
+                            token[:12],
+                            dropped_paths,
+                        )
+
+                    for url in http_urls:
+                        if url in seen_urls:
+                            continue
+                        seen_urls.add(url)
+                        outcome.attempted_urls.append(url)
+                        candidate_index += 1
+
+                        result = await self.download_file_result(url)
+                        if self._is_video_download_result(result):
+                            log.info(
+                                "Downloaded playable video source=documented_http candidate=%d token=%s content_type=%s bytes=%d",
+                                candidate_index,
+                                token[:12],
+                                result.content_type,
+                                len(result.data or b""),
+                            )
+                            outcome.video_bytes = result.data
+                            outcome.source = "documented_http"
+                            return outcome
+
+                        failure_reasons.add("http_video_info_non_playable")
+                        if result.data is not None:
+                            log.warning(
+                                "Documented video candidate=%d token=%s downloaded non-video payload content_type=%s bytes=%d",
+                                candidate_index,
+                                token[:12],
+                                result.content_type,
+                                len(result.data),
+                            )
+
         if video_id in (None, "") or chat_id in (None, "") or not message_id:
-            outcome.failure_reason = "ws_request_error"
+            failure_reasons.add("ws_request_error")
+            outcome.failure_reason = self._select_video_failure_reason(failure_reasons)
             return await self._finalize_video_download_outcome(outcome, video_id=video_id)
 
         try:
@@ -955,7 +1065,8 @@ class MaxClient:
                 chat_id,
                 message_id,
             )
-            outcome.failure_reason = "ws_request_error"
+            failure_reasons.add("ws_request_error")
+            outcome.failure_reason = self._select_video_failure_reason(failure_reasons)
             return await self._finalize_video_download_outcome(outcome, video_id=video_id)
 
         request_payloads = self._build_video_download_request_payloads(
@@ -964,9 +1075,6 @@ class MaxClient:
             message_id=str(message_id),
             token=token,
         )
-        seen_urls: set[str] = set()
-        failure_reasons: set[str] = set()
-        candidate_index = 0
 
         for attempt_index, request_payload in enumerate(request_payloads, start=1):
             outcome.attempted_payloads.append(dict(request_payload))
@@ -1033,13 +1141,14 @@ class MaxClient:
                 result = await self.download_file_result(url)
                 if self._is_video_download_result(result):
                     log.info(
-                        "Downloaded playable video candidate=%d video_id=%s content_type=%s bytes=%d",
+                        "Downloaded playable video source=websocket_mp4 candidate=%d video_id=%s content_type=%s bytes=%d",
                         candidate_index,
                         normalized_video_id,
                         result.content_type,
                         len(result.data or b""),
                     )
                     outcome.video_bytes = result.data
+                    outcome.source = "websocket_mp4"
                     return outcome
 
                 failure_reason = self._classify_video_download_failure_reason(
@@ -1113,10 +1222,14 @@ class MaxClient:
             if preview_result.data is not None:
                 outcome.preview_bytes = preview_result.data
 
+        if outcome.preview_bytes is not None and outcome.source is None:
+            outcome.source = "preview_only"
+
         log.warning(
-            "Video websocket resolution failed video_id=%s reason=%s attempted_payloads=%d attempted_urls=%d",
+            "Video resolution failed video_id=%s reason=%s source=%s attempted_payloads=%d attempted_urls=%d",
             video_id,
             outcome.failure_reason,
+            outcome.source,
             len(outcome.attempted_payloads),
             len(outcome.attempted_urls),
         )
@@ -1347,6 +1460,123 @@ class MaxClient:
         return None
 
     @staticmethod
+    def _normalize_documented_video_info(payload: Any) -> dict:
+        if not isinstance(payload, dict):
+            return {}
+
+        source = payload
+        for key in ("video", "payload", "result", "data"):
+            nested = payload.get(key)
+            if isinstance(nested, dict) and any(
+                field_name in nested
+                for field_name in ("token", "urls", "thumbnail", "width", "height", "duration")
+            ):
+                source = nested
+                break
+
+        return {
+            key: source[key]
+            for key in ("token", "urls", "thumbnail", "width", "height", "duration")
+            if key in source
+        }
+
+    @staticmethod
+    def _extract_documented_video_url_candidates(payload: Any) -> tuple[list[str], list[str]]:
+        candidates: list[tuple[int, int, int, str]] = []
+        dropped_paths: list[str] = []
+        seen: set[str] = set()
+
+        def _quality_from_text(text: str) -> int:
+            best = 0
+            for value in re.findall(r"(?<!\d)(\d{3,4})(?:p|P)?(?!\d)", text):
+                best = max(best, int(value))
+            return best
+
+        def _normalize_http_url(url: Any) -> str | None:
+            if not isinstance(url, str):
+                return None
+
+            normalized = html.unescape(url).strip().replace("\\/", "/")
+            if normalized.startswith("//"):
+                normalized = f"https:{normalized}"
+            parsed = urlparse(normalized)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return None
+            return normalized
+
+        def _has_path_extension(url: str, extensions: tuple[str, ...]) -> bool:
+            path = unquote(urlparse(url).path or "").lower()
+            return any(path.endswith(extension) for extension in extensions)
+
+        def _looks_like_html_page(url: str) -> bool:
+            if MaxClient._is_okru_page_url(url):
+                return True
+            return _has_path_extension(url, _HTML_PAGE_EXTENSIONS)
+
+        def _is_manifest_url(path: str, url: str) -> bool:
+            path_upper = path.upper()
+            if any(marker in path_upper for marker in ("HLS", "DASH", "M3U8", "MPD", "MANIFEST")):
+                return True
+            return _has_path_extension(url, _VIDEO_MANIFEST_EXTENSIONS)
+
+        def _candidate_priority(path: str, url: str) -> int | None:
+            path_upper = path.upper()
+            if _is_manifest_url(path, url) or _looks_like_html_page(url):
+                return None
+
+            if "MP4" in path_upper or _has_path_extension(url, (".mp4",)):
+                return 0
+            if _has_path_extension(url, _DIRECT_VIDEO_EXTENSIONS):
+                return 1
+            if MaxClient._is_max_media_url(url):
+                return 2
+            return 3
+
+        def _register_candidate(path: str, url: Any, index: int) -> None:
+            normalized_url = _normalize_http_url(url)
+            if not normalized_url:
+                if path and path not in dropped_paths:
+                    dropped_paths.append(path)
+                return
+
+            priority = _candidate_priority(path, normalized_url)
+            if priority is None:
+                if path and path not in dropped_paths:
+                    dropped_paths.append(path)
+                return
+            if normalized_url in seen:
+                return
+
+            seen.add(normalized_url)
+            quality = max(_quality_from_text(path), _quality_from_text(normalized_url))
+            candidates.append((priority, -quality, index, normalized_url))
+
+        def _collect(value: Any, *, path: str = "") -> None:
+            if isinstance(value, str):
+                _register_candidate(path, value, len(candidates))
+                return
+
+            if isinstance(value, dict):
+                for key, nested in value.items():
+                    next_path = f"{path}.{key}" if path else str(key)
+                    _collect(nested, path=next_path)
+                return
+
+            if isinstance(value, list):
+                for index, item in enumerate(value):
+                    next_path = f"{path}[{index}]" if path else f"[{index}]"
+                    _collect(item, path=next_path)
+
+        _collect(payload)
+        candidates.sort()
+        return [url for _, _, _, url in candidates], dropped_paths
+
+    @staticmethod
+    def _extract_documented_video_http_urls(payload: Any) -> list[str]:
+        urls, _ = MaxClient._extract_documented_video_url_candidates(payload)
+        return urls
+
+    @staticmethod
     def _extract_video_url_candidates(payload: Any) -> tuple[list[str], list[str]]:
         candidates: list[tuple[int, int, str]] = []
         dropped_paths: list[str] = []
@@ -1427,6 +1657,10 @@ class MaxClient:
                 for index, item in enumerate(value):
                     next_path = f"{path}[{index}]" if path else f"[{index}]"
                     _collect(item, path=next_path)
+                return
+
+            if path:
+                _register_candidate(path, value)
 
         _collect(payload)
         candidates.sort()
