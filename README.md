@@ -69,9 +69,11 @@ bash scripts/setup_bridge.sh \
 Что делает `scripts/setup_bridge.sh`:
 
 - генерирует `secrets/foreign.key`, если ключа ещё нет;
+- мигрирует старый `FOREIGN_SSH_PRIVATE_KEY` из `.env` в `secrets/foreign.key`, если он уже был настроен;
 - создаёт `secrets/relay.env` для foreign relay;
 - создаёт `.env` для bridge;
 - переиспользует значения из существующего `.env`, включая старый `FOREIGN_RELAY_ENV_B64`;
+- если существующий ключ уже пускает на `relay@FOREIGN_SSH_HOST`, пропускает admin/root bootstrap;
 - по admin SSH создаёт пользователя `relay` на foreign-хосте;
 - кладёт публичный ключ в `/home/relay/.ssh/authorized_keys`;
 - создаёт `/home/relay/max2tg`, `data`, `logs`;

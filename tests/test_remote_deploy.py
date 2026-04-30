@@ -164,9 +164,11 @@ def test_setup_bridge_script_exists():
     assert "--foreign-admin" in script_text
     assert "FOREIGN_RELAY_ENV_FILE" in script_text
     assert "FOREIGN_SSH_PRIVATE_KEY_FILE" in script_text
+    assert "FOREIGN_SSH_PRIVATE_KEY" in script_text
     assert "legacy_relay_env_get" in script_text
+    assert "relay_ssh_works" in script_text
     assert "FOREIGN_RELAY_ENV_B64" in script_text
-    assert 'foreign_admin="root@$foreign_host"' in script_text
+    assert "skipping foreign admin bootstrap" in script_text
 
 
 def test_bootstrap_remote_script_keeps_download_errors_visible():
