@@ -108,6 +108,86 @@ class TestLoadSettingsMaxBridge:
         assert settings.foreign_ssh_private_key == OPENSSH_PRIVATE_KEY
         assert settings.foreign_relay_env_text.startswith("APP_ROLE=tg-relay")
 
+    def test_reads_private_key_from_file(self, tmp_path):
+        key_path = tmp_path / "foreign.key"
+        key_path.write_text(OPENSSH_PRIVATE_KEY, encoding="utf-8")
+        env = _bridge_env(FOREIGN_SSH_PRIVATE_KEY_FILE=str(key_path))
+        env.pop("FOREIGN_SSH_PRIVATE_KEY")
+
+        settings = _load_settings_with_env(env)
+
+        assert settings.foreign_ssh_private_key == OPENSSH_PRIVATE_KEY
+        assert settings.foreign_ssh_private_key_file == str(key_path)
+
+    def test_private_key_file_takes_priority_over_inline_key(self, tmp_path):
+        key_path = tmp_path / "foreign.key"
+        key_path.write_text(OPENSSH_PRIVATE_KEY, encoding="utf-8")
+
+        settings = _load_settings_with_env(
+            _bridge_env(
+                FOREIGN_SSH_PRIVATE_KEY_FILE=str(key_path),
+                FOREIGN_SSH_PRIVATE_KEY="not-a-private-key",
+            )
+        )
+
+        assert settings.foreign_ssh_private_key == OPENSSH_PRIVATE_KEY
+
+    def test_reads_foreign_relay_env_from_file(self, tmp_path):
+        relay_env_path = tmp_path / "relay.env"
+        relay_env_text = "\n".join(
+            [
+                "APP_ROLE=tg-relay",
+                "RELAY_SHARED_SECRET=secret-123",
+                "TG_BOT_TOKEN=123456:AAABBBCCC",
+                "TG_CHAT_ID=-100123456",
+                "RELAY_BIND_PORT=8080",
+                "RELAY_HOST_PORT=38080",
+            ]
+        )
+        relay_env_path.write_text(relay_env_text, encoding="utf-8")
+
+        settings = _load_settings_with_env(
+            _bridge_env(
+                RELAY_HOST_PORT="29090",
+                FOREIGN_RELAY_ENV_FILE=str(relay_env_path),
+                FOREIGN_RELAY_ENV_B64=_b64_env("RELAY_HOST_PORT=11111"),
+            )
+        )
+
+        assert settings.relay_host_port == 29090
+        assert settings.foreign_relay_env_file == str(relay_env_path)
+        assert settings.foreign_relay_env_b64 is None
+        assert settings.foreign_relay_env_text == relay_env_text
+        assert settings.foreign_relay_host_port == 38080
+
+    def test_missing_secret_file_raises_clear_error(self, tmp_path):
+        missing_key_path = tmp_path / "missing.key"
+
+        with pytest.raises(SystemExit) as exc:
+            _load_settings_with_env(
+                _bridge_env(
+                    FOREIGN_SSH_PRIVATE_KEY_FILE=str(missing_key_path),
+                    FOREIGN_SSH_PRIVATE_KEY="",
+                )
+            )
+
+        assert "FOREIGN_SSH_PRIVATE_KEY_FILE" in str(exc.value)
+        assert "missing file" in str(exc.value)
+
+    def test_missing_relay_env_file_raises_clear_error(self, tmp_path):
+        missing_relay_env_path = tmp_path / "missing.env"
+
+        with pytest.raises(SystemExit) as exc:
+            _load_settings_with_env(
+                _bridge_env(
+                    FOREIGN_RELAY_ENV_FILE=str(missing_relay_env_path),
+                    FOREIGN_RELAY_ENV_B64="",
+                )
+            )
+
+        assert "FOREIGN_RELAY_ENV_FILE" in str(exc.value)
+        assert "missing file" in str(exc.value)
+
     def test_remote_deploy_env_blob_optional_when_deploy_disabled(self):
         settings = _load_settings_with_env(
             _bridge_env(REMOTE_DEPLOY_ENABLED="false", FOREIGN_RELAY_ENV_B64="")
