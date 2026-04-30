@@ -176,8 +176,21 @@ validate_safe_remote_inputs() {
             ;;
     esac
     case "$foreign_admin" in
-        *\'*|*$'\n'*)
-            fail "foreign admin target must not contain quotes or newlines."
+        *\'*|*$'\n'*|*" "*)
+            fail "foreign admin target must not contain quotes, spaces, or newlines."
+            ;;
+    esac
+    if [ -n "$foreign_admin" ]; then
+        case "$foreign_admin" in
+            *@*) ;;
+            *)
+                fail "foreign admin target must look like user@host. Do not paste a password here; ssh will ask for it later."
+                ;;
+        esac
+    fi
+    case "$foreign_host" in
+        *" "*)
+            fail "foreign host must not contain spaces."
             ;;
     esac
     case "$foreign_user" in
@@ -273,12 +286,18 @@ prompt_missing_values() {
 }
 
 prompt_foreign_admin() {
-    if [ -n "$foreign_admin" ]; then
-        return 0
-    fi
-
     log "Relay SSH access is not ready yet; foreign admin access is needed for one-time bootstrap."
-    prompt_value foreign_admin "Foreign admin SSH target" "root@$foreign_host"
+    log "Press Enter to use root@$foreign_host. Do not paste the root password here; ssh will ask for it separately."
+    while true; do
+        [ -n "$foreign_admin" ] || prompt_value foreign_admin "Foreign admin SSH target" "root@$foreign_host"
+        case "$foreign_admin" in
+            *@*) return 0 ;;
+            *)
+                log "That does not look like user@host. If you pasted a password, press Enter next time and wait for ssh's password prompt."
+                foreign_admin=""
+                ;;
+        esac
+    done
 }
 
 ensure_key_pair() {
@@ -301,6 +320,36 @@ ensure_key_pair() {
 
     chmod 600 "$KEY_PATH" || true
     ssh-keygen -y -f "$KEY_PATH" > "$KEY_PATH.pub" || fail "Could not read SSH private key at $KEY_PATH"
+}
+
+try_legacy_private_key_for_relay_ssh() {
+    local legacy_key=""
+    local temp_key=""
+
+    legacy_key="$(env_get "$BRIDGE_ENV_PATH" FOREIGN_SSH_PRIVATE_KEY)"
+    [ -n "$legacy_key" ] || return 1
+
+    log "Existing relay SSH check failed; retrying with FOREIGN_SSH_PRIVATE_KEY from .env"
+    temp_key="$SECRETS_DIR/foreign.key.legacy.$$"
+    decode_env_scalar "$legacy_key" > "$temp_key"
+    printf '\n' >> "$temp_key"
+    chmod 600 "$temp_key" || true
+
+    if ! ssh-keygen -y -f "$temp_key" > "$temp_key.pub" 2>/dev/null; then
+        rm -f "$temp_key" "$temp_key.pub"
+        return 1
+    fi
+
+    if ssh_works_with_key "$temp_key"; then
+        mv "$temp_key" "$KEY_PATH"
+        mv "$temp_key.pub" "$KEY_PATH.pub"
+        chmod 600 "$KEY_PATH" || true
+        log "Migrated working FOREIGN_SSH_PRIVATE_KEY from .env to $KEY_PATH"
+        return 0
+    fi
+
+    rm -f "$temp_key" "$temp_key.pub"
+    return 1
 }
 
 write_env_files() {
@@ -431,7 +480,13 @@ verify_relay_ssh() {
 relay_ssh_works() {
     need_command ssh
 
-    ssh -p "$foreign_port" -i "$KEY_PATH" \
+    ssh_works_with_key "$KEY_PATH"
+}
+
+ssh_works_with_key() {
+    local ssh_key_path="$1"
+
+    ssh -p "$foreign_port" -i "$ssh_key_path" \
         -o BatchMode=yes \
         -o ConnectTimeout=10 \
         -o StrictHostKeyChecking=accept-new \
@@ -452,6 +507,8 @@ main() {
 
     if relay_ssh_works; then
         log "Existing relay SSH access works; skipping foreign admin bootstrap."
+    elif try_legacy_private_key_for_relay_ssh; then
+        log "Existing relay SSH access works after legacy key migration; skipping foreign admin bootstrap."
     else
         prompt_foreign_admin
         validate_safe_remote_inputs
