@@ -9,6 +9,7 @@ RELAY_ENV_PATH="$SECRETS_DIR/relay.env"
 BRIDGE_ENV_PATH="$APP_DIR/.env"
 
 foreign_admin=""
+foreign_host=""
 foreign_port=""
 foreign_user=""
 foreign_app_dir=""
@@ -31,6 +32,7 @@ Usage:
 
 Options:
   --foreign-admin USER@HOST   SSH admin account for first bootstrap.
+  --foreign-host HOST         Foreign server host/IP. Usually read from existing .env.
   --foreign-port PORT         SSH port for both admin and relay users (default: 22).
   --foreign-user USER         Relay deploy user to create/use (default: relay).
   --foreign-app-dir PATH      App directory on the foreign host (default: /home/relay/max2tg).
@@ -65,6 +67,23 @@ env_get() {
     local key="$2"
     [ -f "$file" ] || return 0
     awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$file"
+}
+
+decode_env_scalar() {
+    local value="$1"
+
+    case "$value" in
+        \"*\")
+            value="${value#\"}"
+            value="${value%\"}"
+            ;;
+        \'*\')
+            value="${value#\'}"
+            value="${value%\'}"
+            ;;
+    esac
+
+    printf '%b' "$value"
 }
 
 relay_env_file_from_bridge_env() {
@@ -151,6 +170,16 @@ random_secret() {
 }
 
 validate_safe_remote_inputs() {
+    case "$foreign_host" in
+        ''|*\'*|*$'\n'*)
+            fail "foreign host must be a non-empty SSH host without quotes or newlines."
+            ;;
+    esac
+    case "$foreign_admin" in
+        *\'*|*$'\n'*)
+            fail "foreign admin target must not contain quotes or newlines."
+            ;;
+    esac
     case "$foreign_user" in
         ''|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
             fail "foreign user must contain only letters, digits, underscore, or dash."
@@ -174,6 +203,7 @@ parse_args() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --foreign-admin) foreign_admin="${2:-}"; shift 2 ;;
+            --foreign-host) foreign_host="${2:-}"; shift 2 ;;
             --foreign-port) foreign_port="${2:-}"; shift 2 ;;
             --foreign-user) foreign_user="${2:-}"; shift 2 ;;
             --foreign-app-dir) foreign_app_dir="${2:-}"; shift 2 ;;
@@ -194,16 +224,17 @@ parse_args() {
 
 load_existing_defaults() {
     local relay_env_defaults_path=""
-    local foreign_host=""
+    local configured_foreign_host=""
 
     relay_env_defaults_path="$(relay_env_file_from_bridge_env)"
     if [ -z "$relay_env_defaults_path" ] && [ -f "$RELAY_ENV_PATH" ]; then
         relay_env_defaults_path="$RELAY_ENV_PATH"
     fi
 
-    foreign_host="$(env_get "$BRIDGE_ENV_PATH" FOREIGN_SSH_HOST)"
-    if [ -n "$foreign_host" ] && [ -z "$foreign_admin" ]; then
-        foreign_admin="root@$foreign_host"
+    configured_foreign_host="$(env_get "$BRIDGE_ENV_PATH" FOREIGN_SSH_HOST)"
+    foreign_host="${foreign_host:-$configured_foreign_host}"
+    if [ -z "$foreign_host" ] && [ -n "$foreign_admin" ]; then
+        foreign_host="${foreign_admin#*@}"
     fi
 
     foreign_port="${foreign_port:-$(env_get "$BRIDGE_ENV_PATH" FOREIGN_SSH_PORT)}"
@@ -229,7 +260,7 @@ load_existing_defaults() {
 }
 
 prompt_missing_values() {
-    [ -n "$foreign_admin" ] || prompt_value foreign_admin "Foreign admin SSH target (for example root@relay.example.com)"
+    [ -n "$foreign_host" ] || prompt_value foreign_host "Foreign server host/IP"
     [ -n "$foreign_port" ] || prompt_value foreign_port "Foreign SSH port" "22"
     [ -n "$foreign_user" ] || prompt_value foreign_user "Foreign relay user" "relay"
     [ -n "$foreign_app_dir" ] || prompt_value foreign_app_dir "Foreign app directory" "/home/relay/max2tg"
@@ -241,20 +272,35 @@ prompt_missing_values() {
     [ -n "$debug" ] || prompt_value debug "Enable debug logs" "false"
 }
 
+prompt_foreign_admin() {
+    if [ -n "$foreign_admin" ]; then
+        return 0
+    fi
+
+    log "Relay SSH access is not ready yet; foreign admin access is needed for one-time bootstrap."
+    prompt_value foreign_admin "Foreign admin SSH target" "root@$foreign_host"
+}
+
 ensure_key_pair() {
     need_command ssh-keygen
     mkdir -p "$SECRETS_DIR"
     chmod 700 "$SECRETS_DIR" || true
 
     if [ ! -f "$KEY_PATH" ]; then
-        log "Generating SSH key at $KEY_PATH"
-        ssh-keygen -t ed25519 -N "" -f "$KEY_PATH" -C max2tg-relay >/dev/null
+        local legacy_key=""
+        legacy_key="$(env_get "$BRIDGE_ENV_PATH" FOREIGN_SSH_PRIVATE_KEY)"
+        if [ -n "$legacy_key" ]; then
+            log "Migrating FOREIGN_SSH_PRIVATE_KEY from .env to $KEY_PATH"
+            decode_env_scalar "$legacy_key" > "$KEY_PATH"
+            printf '\n' >> "$KEY_PATH"
+        else
+            log "Generating SSH key at $KEY_PATH"
+            ssh-keygen -t ed25519 -N "" -f "$KEY_PATH" -C max2tg-relay >/dev/null
+        fi
     fi
 
     chmod 600 "$KEY_PATH" || true
-    if [ ! -f "$KEY_PATH.pub" ]; then
-        ssh-keygen -y -f "$KEY_PATH" > "$KEY_PATH.pub"
-    fi
+    ssh-keygen -y -f "$KEY_PATH" > "$KEY_PATH.pub" || fail "Could not read SSH private key at $KEY_PATH"
 }
 
 write_env_files() {
@@ -291,7 +337,7 @@ REPLY_ENABLED=$reply_enabled
 DEBUG=$debug
 
 RELAY_TUNNEL_LOCAL_PORT=18080
-FOREIGN_SSH_HOST=${foreign_admin#*@}
+FOREIGN_SSH_HOST=$foreign_host
 FOREIGN_SSH_PORT=$foreign_port
 FOREIGN_SSH_USER=$foreign_user
 FOREIGN_SSH_PRIVATE_KEY_FILE=/run/max2tg-secrets/foreign.key
@@ -375,13 +421,21 @@ REMOTE_SETUP
 verify_relay_ssh() {
     need_command ssh
 
-    local foreign_host
-    foreign_host="${foreign_admin#*@}"
     log "Verifying relay SSH access to $foreign_user@$foreign_host"
     ssh -p "$foreign_port" -i "$KEY_PATH" \
         -o BatchMode=yes \
         -o StrictHostKeyChecking=accept-new \
         "$foreign_user@$foreign_host" "true"
+}
+
+relay_ssh_works() {
+    need_command ssh
+
+    ssh -p "$foreign_port" -i "$KEY_PATH" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=10 \
+        -o StrictHostKeyChecking=accept-new \
+        "$foreign_user@$foreign_host" "true" >/dev/null 2>&1
 }
 
 start_bridge() {
@@ -395,9 +449,17 @@ main() {
     prompt_missing_values
     validate_safe_remote_inputs
     ensure_key_pair
+
+    if relay_ssh_works; then
+        log "Existing relay SSH access works; skipping foreign admin bootstrap."
+    else
+        prompt_foreign_admin
+        validate_safe_remote_inputs
+        prepare_foreign_host
+        verify_relay_ssh
+    fi
+
     write_env_files
-    prepare_foreign_host
-    verify_relay_ssh
 
     if [ "$start_compose" = "true" ]; then
         start_bridge
