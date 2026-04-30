@@ -15,6 +15,7 @@ __pycache__
 .pytest_cache/
 data/
 debug/
+secrets/
 pytest-fixtures/
 pytest-temp-files/
 pytest-cache-files/

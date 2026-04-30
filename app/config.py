@@ -4,6 +4,7 @@ import os
 import re
 from dataclasses import dataclass
 from io import StringIO
+from pathlib import Path
 
 from dotenv import dotenv_values, load_dotenv
 
@@ -35,9 +36,12 @@ class Settings:
     foreign_ssh_port: int = 22
     foreign_ssh_user: str | None = None
     foreign_ssh_private_key: str | None = None
+    foreign_ssh_private_key_file: str | None = None
     foreign_app_dir: str = "/home/relay/max2tg"
     remote_deploy_enabled: bool = True
     foreign_relay_env_b64: str | None = None
+    foreign_relay_env_file: str | None = None
+    foreign_relay_env_content: str | None = None
     foreign_relay_host_port: int = 8080
 
     @property
@@ -46,6 +50,8 @@ class Settings:
 
     @property
     def foreign_relay_env_text(self) -> str:
+        if self.foreign_relay_env_content is not None:
+            return self.foreign_relay_env_content
         return _decode_base64_env_text(self.foreign_relay_env_b64)
 
 
@@ -75,6 +81,18 @@ def _decode_base64_env_text(value: str | None) -> str:
         raise SystemExit("FOREIGN_RELAY_ENV_B64 must contain valid base64-encoded UTF-8 text") from exc
 
 
+def _read_env_file(var_name: str, path_value: str | None) -> str | None:
+    if not path_value:
+        return None
+
+    try:
+        return Path(path_value).read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise SystemExit(f"{var_name} points to a missing file: {path_value}") from exc
+    except OSError as exc:
+        raise SystemExit(f"{var_name} could not be read: {path_value}: {exc}") from exc
+
+
 def _resolve_foreign_relay_host_port(remote_env_text: str, default_port: int) -> int:
     if not remote_env_text:
         return default_port
@@ -88,7 +106,7 @@ def _resolve_foreign_relay_host_port(remote_env_text: str, default_port: int) ->
         return int(raw_port)
     except ValueError as exc:
         raise SystemExit(
-            "FOREIGN_RELAY_ENV_B64 must define RELAY_HOST_PORT/RELAY_BIND_PORT as a valid integer"
+            "Foreign relay env must define RELAY_HOST_PORT/RELAY_BIND_PORT as a valid integer"
         ) from exc
 
 
@@ -106,6 +124,14 @@ def _reject_present(env: dict[str, str], names: list[str], *, role: str) -> None
     if present:
         raise SystemExit(
             f"Environment variables not allowed for APP_ROLE={role}: {', '.join(present)}"
+        )
+
+
+def _require_value(value: str | None, description: str) -> None:
+    if not value:
+        raise SystemExit(
+            f"Missing required environment variable: {description}\n"
+            "Copy .env.example to .env and fill in the values."
         )
 
 
@@ -164,8 +190,22 @@ def load_settings() -> Settings:
 
     relay_bind_port = _env_int("RELAY_BIND_PORT", 8080)
     relay_host_port = _env_int("RELAY_HOST_PORT", relay_bind_port)
+    foreign_ssh_private_key_file = env.get("FOREIGN_SSH_PRIVATE_KEY_FILE") or None
+    foreign_ssh_private_key_text = None
+    foreign_relay_env_file = env.get("FOREIGN_RELAY_ENV_FILE") or None
     foreign_relay_env_b64 = env.get("FOREIGN_RELAY_ENV_B64") or None
-    foreign_relay_env_text = _decode_base64_env_text(foreign_relay_env_b64)
+    foreign_relay_env_text = ""
+    if app_role == APP_ROLE_MAX_BRIDGE:
+        foreign_ssh_private_key_text = _read_env_file("FOREIGN_SSH_PRIVATE_KEY_FILE", foreign_ssh_private_key_file)
+        if foreign_ssh_private_key_text is None:
+            foreign_ssh_private_key_text = env.get("FOREIGN_SSH_PRIVATE_KEY") or None
+
+        foreign_relay_env_text = _read_env_file("FOREIGN_RELAY_ENV_FILE", foreign_relay_env_file)
+        if foreign_relay_env_text is None:
+            foreign_relay_env_text = _decode_base64_env_text(foreign_relay_env_b64)
+        else:
+            foreign_relay_env_b64 = None
+
     foreign_relay_host_port = _resolve_foreign_relay_host_port(foreign_relay_env_text, relay_host_port)
 
     settings = Settings(
@@ -188,17 +228,27 @@ def load_settings() -> Settings:
         foreign_ssh_host=env.get("FOREIGN_SSH_HOST") or None,
         foreign_ssh_port=_env_int("FOREIGN_SSH_PORT", 22),
         foreign_ssh_user=env.get("FOREIGN_SSH_USER") or None,
-        foreign_ssh_private_key=_normalize_ssh_private_key(env.get("FOREIGN_SSH_PRIVATE_KEY") or None),
+        foreign_ssh_private_key=_normalize_ssh_private_key(foreign_ssh_private_key_text),
+        foreign_ssh_private_key_file=foreign_ssh_private_key_file,
         foreign_app_dir=env.get("FOREIGN_APP_DIR") or "/home/relay/max2tg",
         remote_deploy_enabled=_env_flag("REMOTE_DEPLOY_ENABLED", default=True),
         foreign_relay_env_b64=foreign_relay_env_b64,
+        foreign_relay_env_file=foreign_relay_env_file,
+        foreign_relay_env_content=foreign_relay_env_text,
         foreign_relay_host_port=foreign_relay_host_port,
     )
 
     if settings.app_role == APP_ROLE_MAX_BRIDGE:
-        _require(env, ["MAX_TOKEN", "MAX_DEVICE_ID", "FOREIGN_SSH_HOST", "FOREIGN_SSH_USER", "FOREIGN_SSH_PRIVATE_KEY"])
+        _require(env, ["MAX_TOKEN", "MAX_DEVICE_ID", "FOREIGN_SSH_HOST", "FOREIGN_SSH_USER"])
+        _require_value(
+            settings.foreign_ssh_private_key,
+            "FOREIGN_SSH_PRIVATE_KEY_FILE or FOREIGN_SSH_PRIVATE_KEY",
+        )
         if settings.remote_deploy_enabled:
-            _require(env, ["FOREIGN_RELAY_ENV_B64"])
+            _require_value(
+                settings.foreign_relay_env_text,
+                "FOREIGN_RELAY_ENV_FILE or FOREIGN_RELAY_ENV_B64",
+            )
         _reject_present(
             env,
             ["TG_BOT_TOKEN", "TG_CHAT_ID", "TOPIC_DB_PATH", "COMMAND_DB_PATH", "MESSAGE_DB_PATH"],
@@ -211,7 +261,19 @@ def load_settings() -> Settings:
     _require(env, ["TG_BOT_TOKEN", "TG_CHAT_ID"])
     _reject_present(
         env,
-        ["MAX_TOKEN", "MAX_DEVICE_ID", "MAX_CHAT_IDS", "FOREIGN_SSH_HOST", "FOREIGN_SSH_PORT", "FOREIGN_SSH_USER", "FOREIGN_SSH_PRIVATE_KEY", "FOREIGN_APP_DIR", "FOREIGN_RELAY_ENV_B64"],
+        [
+            "MAX_TOKEN",
+            "MAX_DEVICE_ID",
+            "MAX_CHAT_IDS",
+            "FOREIGN_SSH_HOST",
+            "FOREIGN_SSH_PORT",
+            "FOREIGN_SSH_USER",
+            "FOREIGN_SSH_PRIVATE_KEY",
+            "FOREIGN_SSH_PRIVATE_KEY_FILE",
+            "FOREIGN_APP_DIR",
+            "FOREIGN_RELAY_ENV_B64",
+            "FOREIGN_RELAY_ENV_FILE",
+        ],
         role=settings.app_role,
     )
 

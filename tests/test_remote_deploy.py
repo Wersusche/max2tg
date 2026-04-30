@@ -103,6 +103,8 @@ def test_build_archive_excludes_local_service_directories():
     (workspace_dir / "tests").mkdir()
     (workspace_dir / "tests" / "test_dummy.py").write_text("assert True\n", encoding="utf-8")
     (workspace_dir / "README.md").write_text("docs\n", encoding="utf-8")
+    (workspace_dir / "secrets").mkdir()
+    (workspace_dir / "secrets" / "foreign.key").write_text("private\n", encoding="utf-8")
 
     manager = _build_manager(workspace_dir)
     try:
@@ -118,6 +120,7 @@ def test_build_archive_excludes_local_service_directories():
     assert "pytest-cache-files-abc/cache.txt" not in names
     assert "tests/test_dummy.py" not in names
     assert "README.md" not in names
+    assert "secrets/foreign.key" not in names
 
 
 def test_dockerignore_keeps_remote_deploy_files_in_image():
@@ -142,6 +145,25 @@ def test_dockerignore_excludes_local_service_directories():
     assert ".tmp/" in dockerignore_lines
     assert "pytest-cache-files-*/" in dockerignore_lines
     assert "requirements-dev.txt" in dockerignore_lines
+    assert "secrets/" in dockerignore_lines
+
+
+def test_gitignore_excludes_secrets_directory():
+    gitignore_lines = {
+        line.strip()
+        for line in Path(".gitignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    assert "secrets/" in gitignore_lines
+
+
+def test_setup_bridge_script_exists():
+    script_text = Path("scripts/setup_bridge.sh").read_text(encoding="utf-8")
+
+    assert "--foreign-admin" in script_text
+    assert "FOREIGN_RELAY_ENV_FILE" in script_text
+    assert "FOREIGN_SSH_PRIVATE_KEY_FILE" in script_text
 
 
 def test_bootstrap_remote_script_keeps_download_errors_visible():

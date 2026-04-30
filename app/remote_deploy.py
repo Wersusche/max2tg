@@ -30,6 +30,7 @@ IGNORED_ARCHIVE_PARTS = {
     "debug",
     "pytest-fixtures",
     "pytest-temp-files",
+    "secrets",
     "tests",
 }
 IGNORED_ARCHIVE_ROOT_PATHS = {
@@ -281,6 +282,6 @@ def _format_command_failure(*, args: list[str], returncode: int, stdout_text: st
             "\nHINT:\n"
             "The foreign host already has something bound to the relay localhost port. "
             "Set RELAY_HOST_PORT in the foreign tg-relay .env to a free 127.0.0.1 port. "
-            "When REMOTE_DEPLOY_ENABLED=true, max-bridge reads that value from FOREIGN_RELAY_ENV_B64 automatically."
+            "When REMOTE_DEPLOY_ENABLED=true, max-bridge reads that value from the foreign relay env automatically."
         )
     return message
