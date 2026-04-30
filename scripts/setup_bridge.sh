@@ -67,6 +67,39 @@ env_get() {
     awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$file"
 }
 
+relay_env_file_from_bridge_env() {
+    local configured_path=""
+    local mapped_path=""
+
+    configured_path="$(env_get "$BRIDGE_ENV_PATH" FOREIGN_RELAY_ENV_FILE)"
+    [ -n "$configured_path" ] || return 0
+
+    case "$configured_path" in
+        /run/max2tg-secrets/*)
+            mapped_path="$SECRETS_DIR/${configured_path#/run/max2tg-secrets/}"
+            ;;
+        *)
+            mapped_path="$configured_path"
+            ;;
+    esac
+
+    if [ -f "$mapped_path" ]; then
+        printf '%s\n' "$mapped_path"
+    fi
+}
+
+legacy_relay_env_get() {
+    local key="$1"
+    local relay_env_b64=""
+
+    relay_env_b64="$(env_get "$BRIDGE_ENV_PATH" FOREIGN_RELAY_ENV_B64)"
+    [ -n "$relay_env_b64" ] || return 0
+
+    printf '%s' "$relay_env_b64" \
+        | base64 -d 2>/dev/null \
+        | awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }'
+}
+
 prompt_value() {
     local var_name="$1"
     local label="$2"
@@ -160,17 +193,39 @@ parse_args() {
 }
 
 load_existing_defaults() {
+    local relay_env_defaults_path=""
+    local foreign_host=""
+
+    relay_env_defaults_path="$(relay_env_file_from_bridge_env)"
+    if [ -z "$relay_env_defaults_path" ] && [ -f "$RELAY_ENV_PATH" ]; then
+        relay_env_defaults_path="$RELAY_ENV_PATH"
+    fi
+
+    foreign_host="$(env_get "$BRIDGE_ENV_PATH" FOREIGN_SSH_HOST)"
+    if [ -n "$foreign_host" ] && [ -z "$foreign_admin" ]; then
+        foreign_admin="root@$foreign_host"
+    fi
+
     foreign_port="${foreign_port:-$(env_get "$BRIDGE_ENV_PATH" FOREIGN_SSH_PORT)}"
     foreign_user="${foreign_user:-$(env_get "$BRIDGE_ENV_PATH" FOREIGN_SSH_USER)}"
     foreign_app_dir="${foreign_app_dir:-$(env_get "$BRIDGE_ENV_PATH" FOREIGN_APP_DIR)}"
     max_token="${max_token:-$(env_get "$BRIDGE_ENV_PATH" MAX_TOKEN)}"
     max_device_id="${max_device_id:-$(env_get "$BRIDGE_ENV_PATH" MAX_DEVICE_ID)}"
     max_chat_ids="${max_chat_ids:-$(env_get "$BRIDGE_ENV_PATH" MAX_CHAT_IDS)}"
-    tg_bot_token="${tg_bot_token:-$(env_get "$RELAY_ENV_PATH" TG_BOT_TOKEN)}"
-    tg_chat_id="${tg_chat_id:-$(env_get "$RELAY_ENV_PATH" TG_CHAT_ID)}"
+    if [ -n "$relay_env_defaults_path" ]; then
+        tg_bot_token="${tg_bot_token:-$(env_get "$relay_env_defaults_path" TG_BOT_TOKEN)}"
+        tg_chat_id="${tg_chat_id:-$(env_get "$relay_env_defaults_path" TG_CHAT_ID)}"
+        relay_host_port="${relay_host_port:-$(env_get "$relay_env_defaults_path" RELAY_HOST_PORT)}"
+        reply_enabled="${reply_enabled:-$(env_get "$relay_env_defaults_path" REPLY_ENABLED)}"
+        debug="${debug:-$(env_get "$relay_env_defaults_path" DEBUG)}"
+    fi
+    tg_bot_token="${tg_bot_token:-$(legacy_relay_env_get TG_BOT_TOKEN)}"
+    tg_chat_id="${tg_chat_id:-$(legacy_relay_env_get TG_CHAT_ID)}"
+    relay_host_port="${relay_host_port:-$(legacy_relay_env_get RELAY_HOST_PORT)}"
+    reply_enabled="${reply_enabled:-$(legacy_relay_env_get REPLY_ENABLED)}"
+    debug="${debug:-$(legacy_relay_env_get DEBUG)}"
     reply_enabled="${reply_enabled:-$(env_get "$BRIDGE_ENV_PATH" REPLY_ENABLED)}"
     debug="${debug:-$(env_get "$BRIDGE_ENV_PATH" DEBUG)}"
-    relay_host_port="${relay_host_port:-$(env_get "$RELAY_ENV_PATH" RELAY_HOST_PORT)}"
 }
 
 prompt_missing_values() {
