@@ -83,6 +83,8 @@ bash scripts/setup_bridge.sh \
 
 После старта `max-bridge` сам загрузит код на foreign-хост, положит туда relay `.env`, запустит `scripts/bootstrap_remote.sh`, поднимет `tg-relay` и откроет SSH tunnel.
 
+Если скрипт всё же спрашивает `Foreign admin SSH target`, это не пароль. Обычно достаточно нажать Enter, чтобы выбрать `root@FOREIGN_SSH_HOST`; пароль, если он нужен, спросит уже сама команда `ssh`.
+
 ## Подготовка Telegram
 
 1. Создайте бота через `@BotFather` и сохраните токен.
