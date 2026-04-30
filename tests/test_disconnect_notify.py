@@ -115,7 +115,7 @@ class TestReadyNotifications:
         assert "2" in sender.send.await_args.args[0]
 
     @pytest.mark.asyncio
-    async def test_reconnect_does_not_send_restored_notification(self):
+    async def test_reconnect_sends_restored_notification_after_reported_outage(self):
         client, sender = _make_client()
         snapshot = _snapshot()
 
@@ -125,5 +125,31 @@ class TestReadyNotifications:
         await client._on_disconnect_cb()
         sender.send.reset_mock()
         await client._on_ready_cb(snapshot)
+
+        sender.send.assert_awaited_once()
+        assert "соединение восстановлено" in sender.send.await_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_reconnect_does_not_send_restored_notification_after_suppressed_outage(self):
+        client, sender = _make_client()
+        snapshot = _snapshot()
+        t0 = datetime(2026, 4, 5, 10, 0, 0)
+        t_ready = datetime(2026, 4, 5, 10, 5, 0)
+        t1 = datetime(2026, 4, 5, 10, 30, 0)
+        t2 = datetime(2026, 4, 5, 10, 35, 0)
+
+        with patch("app.max_listener.datetime") as mock_dt:
+            mock_dt.now.return_value = t0
+            await client._on_disconnect_cb()
+
+            mock_dt.now.return_value = t_ready
+            await client._on_ready_cb(snapshot)
+
+            mock_dt.now.return_value = t1
+            sender.send.reset_mock()
+            await client._on_disconnect_cb()
+
+            mock_dt.now.return_value = t2
+            await client._on_ready_cb(snapshot)
 
         sender.send.assert_not_awaited()
