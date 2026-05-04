@@ -473,3 +473,122 @@ async def test_dual_node_telegram_reply_roundtrip_becomes_native_reply_both_ways
         topic_store.close()
         command_store.close()
         message_store.close()
+
+
+@pytest.mark.asyncio
+async def test_dual_node_profiles_keep_same_max_chat_id_separate(tmp_path):
+    sender_alpha = SimpleNamespace(
+        chat_id="-100",
+        send=AsyncMock(return_value=SimpleNamespace(message_id=7001)),
+        send_photo=AsyncMock(return_value=SimpleNamespace(message_id=8001)),
+        send_document=AsyncMock(return_value=SimpleNamespace(message_id=8101)),
+        send_video=AsyncMock(return_value=SimpleNamespace(message_id=8201)),
+        send_voice=AsyncMock(return_value=SimpleNamespace(message_id=8301)),
+        send_sticker=AsyncMock(return_value=SimpleNamespace(message_id=8401)),
+        create_forum_topic=AsyncMock(return_value=SimpleNamespace(message_thread_id=55)),
+        edit_forum_topic=AsyncMock(return_value=True),
+    )
+    sender_beta = SimpleNamespace(
+        chat_id="-100",
+        send=AsyncMock(return_value=SimpleNamespace(message_id=7101)),
+        send_photo=AsyncMock(return_value=SimpleNamespace(message_id=8011)),
+        send_document=AsyncMock(return_value=SimpleNamespace(message_id=8111)),
+        send_video=AsyncMock(return_value=SimpleNamespace(message_id=8211)),
+        send_voice=AsyncMock(return_value=SimpleNamespace(message_id=8311)),
+        send_sticker=AsyncMock(return_value=SimpleNamespace(message_id=8411)),
+        create_forum_topic=AsyncMock(return_value=SimpleNamespace(message_thread_id=55)),
+        edit_forum_topic=AsyncMock(return_value=True),
+    )
+    topic_store = TopicStore(str(tmp_path / "topics.sqlite3"))
+    command_store = CommandStore(str(tmp_path / "commands.sqlite3"))
+    message_store = MessageStore(str(tmp_path / "messages.sqlite3"))
+    processors = {
+        "alpha": RelayBatchProcessor(
+            sender_alpha,
+            TopicRouter(topic_store, sender_alpha, profile_id="alpha"),
+            message_store,
+            profile_id="alpha",
+        ),
+        "beta": RelayBatchProcessor(
+            sender_beta,
+            TopicRouter(topic_store, sender_beta, profile_id="beta"),
+            message_store,
+            profile_id="beta",
+        ),
+    }
+    app = create_relay_app(processors, command_store, message_store, "secret")
+    server = TestServer(app)
+    client = TestClient(server)
+    await client.start_server()
+    relay_client = RelayClient(str(client.make_url("")).rstrip("/"), "secret")
+    await relay_client.start()
+
+    try:
+        resolver = MagicMock()
+        resolver.resolve_user = AsyncMock(return_value="Alice")
+        resolver.is_dm.return_value = True
+        resolver.chat_name.return_value = "Alice"
+        resolver.load_snapshot.return_value = []
+        sender_stub = AsyncMock()
+        sender_stub.send = AsyncMock(return_value="ok")
+
+        with patch("app.max_listener.ContactResolver", return_value=resolver):
+            alpha_client = create_max_client(
+                max_token="tok-alpha",
+                max_device_id="dev-alpha",
+                sender=sender_stub,
+                relay_client=relay_client,
+                profile_id="alpha",
+            )
+            beta_client = create_max_client(
+                max_token="tok-beta",
+                max_device_id="dev-beta",
+                sender=sender_stub,
+                relay_client=relay_client,
+                profile_id="beta",
+            )
+
+        await alpha_client._on_message_cb(
+            MaxMessage(chat_id=42, sender_id=7, text="Alpha seed", message_id="max-alpha")
+        )
+        await beta_client._on_message_cb(
+            MaxMessage(chat_id=42, sender_id=7, text="Beta seed", message_id="max-beta")
+        )
+
+        assert sender_alpha.send.await_args.args[0].endswith("Alpha seed")
+        assert sender_beta.send.await_args.args[0].endswith("Beta seed")
+        assert message_store.get_by_max_message(
+            profile_id="alpha",
+            max_chat_id=42,
+            max_message_id="max-alpha",
+        ).tg_message_id == 7001
+        assert message_store.get_by_max_message(
+            profile_id="beta",
+            max_chat_id=42,
+            max_message_id="max-beta",
+        ).tg_message_id == 7101
+
+        update = _make_topic_update("Reply beta", thread_id=55, message_id=9001)
+        context = MagicMock()
+        context.bot_data = {
+            "allowed_chat_id": -100,
+            "profile_id": "beta",
+            "topic_store": topic_store,
+            "message_store": message_store,
+            "command_store": command_store,
+        }
+
+        await _on_topic_message(update, context)
+
+        assert await relay_client.pull_command(timeout_seconds=0, profile_id="alpha") is None
+        command = await relay_client.pull_command(timeout_seconds=0, profile_id="beta")
+        assert command is not None
+        assert command.profile_id == "beta"
+        assert command.max_chat_id == "42"
+        assert "Reply beta" in command.text
+    finally:
+        await relay_client.stop()
+        await client.close()
+        topic_store.close()
+        command_store.close()
+        message_store.close()

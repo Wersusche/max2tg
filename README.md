@@ -221,6 +221,32 @@ docker compose up -d --build
 
 Если не хотите давать `relay` passwordless sudo, поставьте `REMOTE_DEPLOY_ENABLED=false`, разверните `tg-relay` вручную и оставьте SSH-доступ только для tunnel.
 
+## Multi-account profiles
+
+The legacy single-account `.env` still works. For multiple Max/Telegram accounts,
+set `ACCOUNTS_CONFIG_FILE=/run/max2tg-secrets/accounts.yaml` on the bridge and
+put profiles into `secrets/accounts.yaml`:
+
+```yaml
+version: 1
+profiles:
+  - id: work
+    label: Work
+    enabled: true
+    max:
+      token: your___oneme_auth_value
+      device_id: your___oneme_device_id_value
+      chat_ids: ["-123", "-456"]
+    telegram:
+      bot_token: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+      chat_id: "-1001234567890"
+```
+
+Each enabled profile is one Max account, one Telegram bot token, and one Telegram
+forum supergroup. Restart the containers after editing the YAML. During remote
+deploy, the bridge sends the relay only the Telegram slice of this YAML; Max
+tokens stay on the bridge node.
+
 ## Docker
 
 Используется один и тот же образ для обеих ролей.

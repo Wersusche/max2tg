@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 
+from app.config import DEFAULT_PROFILE_ID
+
 SUPPORTED_REACTION_TYPES = {"emoji", "custom_emoji"}
 SUPPORTED_REACTION_ACTIONS = {"add", "remove", "replace"}
 
@@ -18,6 +20,7 @@ class ReactionSyncEvent:
     reaction_value: str
     action: str
     actor_key: str
+    profile_id: str = DEFAULT_PROFILE_ID
 
     def __post_init__(self) -> None:
         normalized_reaction_type = str(self.reaction_type).lower()
@@ -34,6 +37,7 @@ class ReactionSyncEvent:
         object.__setattr__(self, "reaction_value", str(self.reaction_value))
         object.__setattr__(self, "action", normalized_action)
         object.__setattr__(self, "actor_key", str(self.actor_key))
+        object.__setattr__(self, "profile_id", str(self.profile_id or DEFAULT_PROFILE_ID))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -44,6 +48,7 @@ class ReactionSyncEvent:
             "reaction_value": self.reaction_value,
             "action": self.action,
             "actor_key": self.actor_key,
+            "profile_id": self.profile_id,
         }
 
     @classmethod
@@ -56,10 +61,12 @@ class ReactionSyncEvent:
             reaction_value=str(payload.get("reaction_value", "")),
             action=str(payload["action"]),
             actor_key=str(payload["actor_key"]),
+            profile_id=str(payload.get("profile_id") or DEFAULT_PROFILE_ID),
         )
 
-    def dedupe_key(self) -> tuple[str, str, str, str, str, str, str]:
+    def dedupe_key(self) -> tuple[str, str, str, str, str, str, str, str]:
         return (
+            self.profile_id,
             self.origin_platform,
             self.target_chat_id,
             self.target_message_id,
@@ -73,7 +80,7 @@ class ReactionSyncEvent:
 class ReactionSyncDeduper:
     def __init__(self, ttl_seconds: float = 120.0):
         self.ttl_seconds = max(1.0, float(ttl_seconds))
-        self._entries: dict[tuple[str, str, str, str, str, str, str], float] = {}
+        self._entries: dict[tuple[str, str, str, str, str, str, str, str], float] = {}
         self._lock = RLock()
 
     def check_and_remember(self, event: ReactionSyncEvent) -> bool:

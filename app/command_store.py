@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.config import DEFAULT_PROFILE_ID
 from app.relay_models import MaxCommand
 
 DEFAULT_MAX_FAILURE_ATTEMPTS = 3
@@ -51,6 +52,7 @@ class CommandStore:
                 """
                 CREATE TABLE IF NOT EXISTS max_commands (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id TEXT NOT NULL DEFAULT 'default',
                     max_chat_id TEXT NOT NULL,
                     kind TEXT NOT NULL DEFAULT 'text',
                     text TEXT NOT NULL,
@@ -73,6 +75,10 @@ class CommandStore:
                 str(row["name"])
                 for row in self._conn.execute("PRAGMA table_info(max_commands)").fetchall()
             }
+            if "profile_id" not in existing_columns:
+                self._conn.execute(
+                    "ALTER TABLE max_commands ADD COLUMN profile_id TEXT NOT NULL DEFAULT 'default'"
+                )
             if "kind" not in existing_columns:
                 self._conn.execute(
                     "ALTER TABLE max_commands ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'"
@@ -121,6 +127,7 @@ class CommandStore:
         text: str,
         elements: list[dict[str, Any]] | None = None,
         *,
+        profile_id: str = DEFAULT_PROFILE_ID,
         reply_to_max_message_id: Any | None = None,
         tg_chat_id: int | None = None,
         tg_message_id: int | None = None,
@@ -131,6 +138,7 @@ class CommandStore:
             cur = self._conn.execute(
                 """
                 INSERT INTO max_commands (
+                    profile_id,
                     max_chat_id,
                     kind,
                     text,
@@ -146,9 +154,10 @@ class CommandStore:
                     last_error,
                     leased_at
                 )
-                VALUES (?, 'text', ?, ?, NULL, NULL, ?, ?, ?, ?, 0, NULL, NULL, NULL)
+                VALUES (?, ?, 'text', ?, ?, NULL, NULL, ?, ?, ?, ?, 0, NULL, NULL, NULL)
                 """,
                 (
+                    str(profile_id or DEFAULT_PROFILE_ID),
                     str(max_chat_id),
                     text,
                     payload,
@@ -163,6 +172,7 @@ class CommandStore:
         self._notify_waiters()
         return MaxCommand(
             id=command_id,
+            profile_id=str(profile_id or DEFAULT_PROFILE_ID),
             max_chat_id=str(max_chat_id),
             text=text,
             kind="text",
@@ -181,6 +191,7 @@ class CommandStore:
         elements: list[dict[str, Any]] | None = None,
         filename: str = "photo.jpg",
         *,
+        profile_id: str = DEFAULT_PROFILE_ID,
         reply_to_max_message_id: Any | None = None,
         tg_chat_id: int | None = None,
         tg_message_id: int | None = None,
@@ -191,6 +202,7 @@ class CommandStore:
             cur = self._conn.execute(
                 """
                 INSERT INTO max_commands (
+                    profile_id,
                     max_chat_id,
                     kind,
                     text,
@@ -206,9 +218,10 @@ class CommandStore:
                     last_error,
                     leased_at
                 )
-                VALUES (?, 'photo', ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL)
+                VALUES (?, ?, 'photo', ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL)
                 """,
                 (
+                    str(profile_id or DEFAULT_PROFILE_ID),
                     str(max_chat_id),
                     caption,
                     payload,
@@ -225,6 +238,7 @@ class CommandStore:
         self._notify_waiters()
         return MaxCommand(
             id=command_id,
+            profile_id=str(profile_id or DEFAULT_PROFILE_ID),
             max_chat_id=str(max_chat_id),
             text=caption,
             kind="photo",
@@ -245,6 +259,7 @@ class CommandStore:
         elements: list[dict[str, Any]] | None = None,
         filename: str = "file",
         *,
+        profile_id: str = DEFAULT_PROFILE_ID,
         reply_to_max_message_id: Any | None = None,
         tg_chat_id: int | None = None,
         tg_message_id: int | None = None,
@@ -257,6 +272,7 @@ class CommandStore:
             text=caption,
             elements=elements,
             filename=filename,
+            profile_id=profile_id,
             reply_to_max_message_id=reply_to_max_message_id,
             tg_chat_id=tg_chat_id,
             tg_message_id=tg_message_id,
@@ -272,6 +288,7 @@ class CommandStore:
         text: str = "",
         elements: list[dict[str, Any]] | None = None,
         filename: str | None = None,
+        profile_id: str = DEFAULT_PROFILE_ID,
         reply_to_max_message_id: Any | None = None,
         tg_chat_id: int | None = None,
         tg_message_id: int | None = None,
@@ -282,6 +299,7 @@ class CommandStore:
             cur = self._conn.execute(
                 """
                 INSERT INTO max_commands (
+                    profile_id,
                     max_chat_id,
                     kind,
                     text,
@@ -297,9 +315,10 @@ class CommandStore:
                     last_error,
                     leased_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL)
                 """,
                 (
+                    str(profile_id or DEFAULT_PROFILE_ID),
                     str(max_chat_id),
                     str(kind),
                     text,
@@ -317,6 +336,7 @@ class CommandStore:
         self._notify_waiters()
         return MaxCommand(
             id=command_id,
+            profile_id=str(profile_id or DEFAULT_PROFILE_ID),
             max_chat_id=str(max_chat_id),
             text=text,
             kind=str(kind),
@@ -329,12 +349,14 @@ class CommandStore:
             message_thread_id=int(message_thread_id) if message_thread_id is not None else None,
         )
 
-    def lease_next(self) -> MaxCommand | None:
+    def lease_next(self, profile_id: str = DEFAULT_PROFILE_ID) -> MaxCommand | None:
+        normalized_profile_id = str(profile_id or DEFAULT_PROFILE_ID)
         with self._lock:
             row = self._conn.execute(
                 """
                 SELECT
                     id,
+                    profile_id,
                     max_chat_id,
                     kind,
                     text,
@@ -349,9 +371,11 @@ class CommandStore:
                 FROM max_commands
                 WHERE leased_at IS NULL
                   AND failed_at IS NULL
+                  AND profile_id = ?
                 ORDER BY id ASC
                 LIMIT 1
-                """
+                """,
+                (normalized_profile_id,),
             ).fetchone()
             if row is None:
                 self._conn.commit()
@@ -370,6 +394,7 @@ class CommandStore:
                 """
                 SELECT
                     id,
+                    profile_id,
                     max_chat_id,
                     kind,
                     text,
@@ -468,12 +493,14 @@ class CommandStore:
     async def wait_for_command(
         self,
         timeout_seconds: float = 30.0,
+        profile_id: str = DEFAULT_PROFILE_ID,
     ) -> MaxCommand | None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, timeout_seconds)
+        normalized_profile_id = str(profile_id or DEFAULT_PROFILE_ID)
 
         while True:
-            command = self.lease_next()
+            command = self.lease_next(normalized_profile_id)
             if command is not None:
                 return command
 
@@ -493,6 +520,7 @@ class CommandStore:
     def _row_to_command(row: sqlite3.Row) -> MaxCommand:
         return MaxCommand(
             id=int(row["id"]),
+            profile_id=str(row["profile_id"]),
             max_chat_id=str(row["max_chat_id"]),
             kind=str(row["kind"]),
             text=str(row["text"]),

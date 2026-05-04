@@ -6,6 +6,7 @@ from typing import Any
 
 from telegram.error import BadRequest
 
+from app.config import DEFAULT_PROFILE_ID
 from app.max_client import MaxClient, MaxMessage
 from app.message_store import MessageStore
 from app.relay_client import RelayClient
@@ -615,6 +616,7 @@ def _extract_linked_max_message_id(link: dict) -> str | None:
 async def _resolve_reply_to_message_id(
     *,
     msg: MaxMessage,
+    profile_id: str,
     message_store: MessageStore | None,
     relay_client: RelayClient | None,
 ) -> int | None:
@@ -628,6 +630,7 @@ async def _resolve_reply_to_message_id(
 
     if relay_client is not None:
         return await relay_client.lookup_message_mapping(
+            profile_id=profile_id,
             max_chat_id=msg.chat_id,
             max_message_id=linked_max_message_id,
         )
@@ -636,6 +639,7 @@ async def _resolve_reply_to_message_id(
         return None
 
     mapping = message_store.get_by_max_message(
+        profile_id=profile_id,
         max_chat_id=msg.chat_id,
         max_message_id=linked_max_message_id,
         direction=None,
@@ -648,12 +652,14 @@ async def _resolve_reply_to_message_id(
 def _get_existing_max_mapping(
     message_store: MessageStore | None,
     *,
+    profile_id: str,
     max_chat_id: Any,
     max_message_id: str,
 ):
     if message_store is None or not max_message_id:
         return None
     return message_store.get_by_max_message(
+        profile_id=profile_id,
         max_chat_id=max_chat_id,
         max_message_id=max_message_id,
     )
@@ -662,6 +668,7 @@ def _get_existing_max_mapping(
 def _store_message_mapping(
     message_store: MessageStore | None,
     *,
+    profile_id: str,
     tg_chat_id: int | None,
     msg: MaxMessage,
     message_thread_id: int | None,
@@ -670,6 +677,7 @@ def _store_message_mapping(
     if message_store is None or tg_chat_id is None or tg_message_id is None or not msg.message_id:
         return
     message_store.upsert_mapping(
+        profile_id=profile_id,
         tg_chat_id=tg_chat_id,
         max_chat_id=msg.chat_id,
         max_message_id=msg.message_id,
@@ -764,6 +772,7 @@ async def forward_max_message(
     client: MaxClient,
     sender: Any,
     resolver: ContactResolver,
+    profile_id: str = DEFAULT_PROFILE_ID,
     topic_router: TopicRouter | None = None,
     relay_client: RelayClient | None = None,
     message_store: MessageStore | None = None,
@@ -782,6 +791,7 @@ async def forward_max_message(
 
     existing_mapping = _get_existing_max_mapping(
         message_store,
+        profile_id=profile_id,
         max_chat_id=msg.chat_id,
         max_message_id=msg.message_id,
     )
@@ -807,6 +817,7 @@ async def forward_max_message(
 
     native_reply_to_message_id = await _resolve_reply_to_message_id(
         msg=msg,
+        profile_id=profile_id,
         message_store=message_store,
         relay_client=relay_client,
     )
@@ -888,6 +899,7 @@ async def forward_max_message(
             operation_builder.build_batch(
                 msg.chat_id,
                 topic_name,
+                profile_id=profile_id,
                 max_message_id=msg.message_id or None,
                 reply_to_message_id=native_reply_to_message_id,
                 mapping_operation_index=mapping_operation_index,
@@ -901,6 +913,7 @@ async def forward_max_message(
         tg_chat_id = _resolve_tg_chat_id(sender, topic_router)
         _store_message_mapping(
             message_store,
+            profile_id=profile_id,
             tg_chat_id=tg_chat_id,
             msg=msg,
             message_thread_id=None,
@@ -927,6 +940,7 @@ async def forward_max_message(
     tg_chat_id = _resolve_tg_chat_id(sender, topic_router)
     _store_message_mapping(
         message_store,
+        profile_id=profile_id,
         tg_chat_id=tg_chat_id,
         msg=msg,
         message_thread_id=thread_id,

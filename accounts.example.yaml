@@ -1,0 +1,24 @@
+version: 1
+profiles:
+  - id: default
+    label: Default
+    enabled: true
+    max:
+      token: your___oneme_auth_value
+      device_id: your___oneme_device_id_value
+      chat_ids: ""
+    telegram:
+      bot_token: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+      chat_id: "-1001234567890"
+  - id: work
+    label: Work
+    enabled: false
+    max:
+      token: another___oneme_auth_value
+      device_id: another___oneme_device_id_value
+      chat_ids:
+        - "-123"
+        - "-456"
+    telegram:
+      bot_token: "987654:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+      chat_id: "-1009876543210"

@@ -107,11 +107,88 @@ class TestLoadSettingsMaxBridge:
         assert settings.max_token == "token123"
         assert settings.max_device_id == "device-abc"
         assert settings.max_chat_ids == "1,2"
+        assert settings.enabled_profiles[0].id == "default"
         assert settings.debug is True
         assert settings.reply_enabled is True
         assert settings.foreign_ssh_host == "relay.example.com"
         assert settings.foreign_ssh_private_key == OPENSSH_PRIVATE_KEY
         assert settings.foreign_relay_env_text.startswith("APP_ROLE=tg-relay")
+
+    def test_loads_account_profiles_from_yaml_and_sends_telegram_slice(self, tmp_path):
+        accounts_path = tmp_path / "accounts.yaml"
+        accounts_path.write_text(
+            "\n".join(
+                [
+                    "version: 1",
+                    "profiles:",
+                    "  - id: alpha",
+                    "    label: Alpha",
+                    "    enabled: true",
+                    "    max:",
+                    "      token: max-token-alpha",
+                    "      device_id: device-alpha",
+                    "      chat_ids: [42, 43]",
+                    "    telegram:",
+                    "      bot_token: tg-token-alpha",
+                    "      chat_id: '-1001'",
+                    "  - id: beta",
+                    "    label: Beta",
+                    "    enabled: true",
+                    "    max:",
+                    "      token: max-token-beta",
+                    "      device_id: device-beta",
+                    "    telegram:",
+                    "      bot_token: tg-token-beta",
+                    "      chat_id: '-1002'",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        settings = _load_settings_with_env(
+            _bridge_env(
+                MAX_TOKEN="",
+                MAX_DEVICE_ID="",
+                ACCOUNTS_CONFIG_FILE=str(accounts_path),
+            )
+        )
+
+        assert [profile.id for profile in settings.enabled_profiles] == ["alpha", "beta"]
+        assert settings.enabled_profiles[0].max.chat_ids == "42,43"
+        assert "max-token-alpha" not in settings.foreign_relay_env_text
+        assert "max-token-beta" not in settings.foreign_relay_env_text
+        encoded = settings.foreign_relay_env_text.split("ACCOUNTS_CONFIG_YAML_B64=", 1)[1].strip()
+        decoded = base64.b64decode(encoded).decode("utf-8")
+        assert "tg-token-alpha" in decoded
+        assert "max-token-alpha" not in decoded
+
+    def test_duplicate_profile_id_raises(self, tmp_path):
+        accounts_path = tmp_path / "accounts.yaml"
+        accounts_path.write_text(
+            "\n".join(
+                [
+                    "version: 1",
+                    "profiles:",
+                    "  - id: alpha",
+                    "    max: {token: max-token-alpha, device_id: device-alpha}",
+                    "    telegram: {bot_token: tg-token-alpha, chat_id: '-1001'}",
+                    "  - id: alpha",
+                    "    max: {token: max-token-beta, device_id: device-beta}",
+                    "    telegram: {bot_token: tg-token-beta, chat_id: '-1002'}",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            _load_settings_with_env(
+                _bridge_env(
+                    MAX_TOKEN="",
+                    MAX_DEVICE_ID="",
+                    ACCOUNTS_CONFIG_FILE=str(accounts_path),
+                )
+            )
+        assert "duplicate profile id" in str(exc.value)
 
     def test_reads_private_key_from_file(self, tmp_path):
         key_path = tmp_path / "foreign.key"
@@ -345,6 +422,37 @@ class TestLoadSettingsRelay:
         assert settings.message_db_path == "/tmp/messages.sqlite3"
         assert settings.debug is True
         assert settings.reply_enabled is True
+        assert settings.enabled_profiles[0].id == "default"
+
+    def test_relay_loads_telegram_only_profiles_from_yaml(self, tmp_path):
+        accounts_path = tmp_path / "accounts.yaml"
+        accounts_path.write_text(
+            "\n".join(
+                [
+                    "version: 1",
+                    "profiles:",
+                    "  - id: alpha",
+                    "    telegram:",
+                    "      bot_token: tg-token-alpha",
+                    "      chat_id: '-1001'",
+                    "  - id: disabled",
+                    "    enabled: false",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        settings = _load_settings_with_env(
+            _relay_env(
+                TG_BOT_TOKEN="",
+                TG_CHAT_ID="",
+                ACCOUNTS_CONFIG_FILE=str(accounts_path),
+            )
+        )
+
+        assert [profile.id for profile in settings.enabled_profiles] == ["alpha"]
+        assert settings.enabled_profiles[0].telegram.bot_token == "tg-token-alpha"
+        assert settings.enabled_profiles[0].max is None
 
     def test_invalid_tg_chat_id_raises(self):
         with pytest.raises(SystemExit) as exc:

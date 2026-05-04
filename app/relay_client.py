@@ -7,6 +7,7 @@ from typing import Any
 
 import aiohttp
 
+from app.config import DEFAULT_PROFILE_ID
 from app.relay_models import MaxCommand, RelayOperation, TelegramBatch
 
 log = logging.getLogger(__name__)
@@ -97,21 +98,35 @@ class RelayClient:
 
         await self._request_with_recovery(_send, "send Telegram batch")
 
-    async def send_text(self, text: str, topic_name: str | None = None) -> None:
+    async def send_text(
+        self,
+        text: str,
+        topic_name: str | None = None,
+        *,
+        profile_id: str = DEFAULT_PROFILE_ID,
+    ) -> None:
         await self.send_batch(
             TelegramBatch(
+                profile_id=str(profile_id or DEFAULT_PROFILE_ID),
                 max_chat_id="__system__",
                 topic_name=topic_name,
                 operations=[RelayOperation(kind="text", text=text)],
             )
         )
 
-    async def pull_command(self, timeout_seconds: int = 30) -> MaxCommand | None:
+    async def pull_command(
+        self,
+        timeout_seconds: int = 30,
+        *,
+        profile_id: str = DEFAULT_PROFILE_ID,
+    ) -> MaxCommand | None:
+        normalized_profile_id = str(profile_id or DEFAULT_PROFILE_ID)
+
         async def _pull() -> MaxCommand | None:
             session = await self._get_session()
             async with session.get(
                 f"{self.base_url}/internal/max-commands/pull",
-                params={"timeout": timeout_seconds},
+                params={"timeout": timeout_seconds, "profile_id": normalized_profile_id},
                 headers={SECRET_HEADER: self.shared_secret},
                 timeout=aiohttp.ClientTimeout(total=timeout_seconds + 10),
             ) as resp:
@@ -148,12 +163,21 @@ class RelayClient:
 
         return await self._request_with_recovery(_fail, "fail Max command")
 
-    async def lookup_message_mapping(self, *, max_chat_id: Any, max_message_id: Any) -> int | None:
+    async def lookup_message_mapping(
+        self,
+        *,
+        profile_id: str = DEFAULT_PROFILE_ID,
+        max_chat_id: Any,
+        max_message_id: Any,
+    ) -> int | None:
+        normalized_profile_id = str(profile_id or DEFAULT_PROFILE_ID)
+
         async def _lookup() -> int | None:
             session = await self._get_session()
             async with session.get(
                 f"{self.base_url}/internal/message-mappings/lookup",
                 params={
+                    "profile_id": normalized_profile_id,
                     "max_chat_id": str(max_chat_id),
                     "max_message_id": str(max_message_id),
                 },
@@ -174,6 +198,7 @@ class RelayClient:
     async def upsert_message_mapping(
         self,
         *,
+        profile_id: str = DEFAULT_PROFILE_ID,
         tg_chat_id: int,
         tg_message_id: int,
         max_chat_id: Any,
@@ -182,11 +207,14 @@ class RelayClient:
         direction: str = "tg_to_max",
         source: str = "telegram",
     ) -> None:
+        normalized_profile_id = str(profile_id or DEFAULT_PROFILE_ID)
+
         async def _upsert() -> None:
             session = await self._get_session()
             async with session.post(
                 f"{self.base_url}/internal/message-mappings/upsert",
                 json={
+                    "profile_id": normalized_profile_id,
                     "tg_chat_id": int(tg_chat_id),
                     "tg_message_id": int(tg_message_id),
                     "max_chat_id": str(max_chat_id),
@@ -225,8 +253,9 @@ class RelayClient:
 class RelayStatusSender:
     """Minimal sender used by Max notifications when Telegram lives on relay."""
 
-    def __init__(self, relay_client: RelayClient):
+    def __init__(self, relay_client: RelayClient, profile_id: str = DEFAULT_PROFILE_ID):
         self.relay_client = relay_client
+        self.profile_id = str(profile_id or DEFAULT_PROFILE_ID)
 
     async def send(
         self,
@@ -240,6 +269,7 @@ class RelayStatusSender:
         try:
             await self.relay_client.send_batch(
                 TelegramBatch(
+                    profile_id=self.profile_id,
                     max_chat_id="__system__",
                     topic_name=None,
                     operations=[RelayOperation(kind="text", text=text)],

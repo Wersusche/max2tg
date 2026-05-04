@@ -72,3 +72,15 @@ def test_delete_by_thread(tmp_path):
     assert store.get_by_max_chat(-100, 42) is None
     assert store.get_by_thread(-100, 123) is None
     store.close()
+
+
+def test_profiles_isolate_same_max_chat_and_thread(tmp_path):
+    store = _make_store(tmp_path)
+    alpha = store.upsert_mapping(-100, 42, 123, "Alice", profile_id="alpha")
+    beta = store.upsert_mapping(-100, 42, 456, "Bob", profile_id="beta")
+
+    assert store.get_by_max_chat(-100, 42, profile_id="alpha") == alpha
+    assert store.get_by_max_chat(-100, 42, profile_id="beta") == beta
+    assert store.get_by_thread(-100, 123, profile_id="alpha") == alpha
+    assert store.get_by_thread(-100, 123, profile_id="beta") is None
+    store.close()

@@ -11,7 +11,7 @@ from aiohttp import web
 from telegram import Update
 
 from app.command_store import CommandStore
-from app.config import APP_ROLE_MAX_BRIDGE, APP_ROLE_TG_RELAY, load_settings
+from app.config import APP_ROLE_MAX_BRIDGE, APP_ROLE_TG_RELAY, DEFAULT_PROFILE_ID, AccountProfile, load_settings
 from app.max_listener import create_max_client
 from app.message_store import MessageStore
 from app.relay_client import RelayClient, RelayStatusSender
@@ -137,10 +137,16 @@ async def _mark_relay_command_failed(
         return None
 
 
-async def _relay_command_loop(relay_client: RelayClient, max_client) -> None:
+async def _relay_command_loop(
+    relay_client: RelayClient,
+    max_client,
+    *,
+    profile_id: str = DEFAULT_PROFILE_ID,
+) -> None:
+    profile_id = str(profile_id or DEFAULT_PROFILE_ID)
     while True:
         try:
-            command = await relay_client.pull_command(timeout_seconds=30)
+            command = await relay_client.pull_command(timeout_seconds=30, profile_id=profile_id)
             if command is None:
                 continue
             log.info(
@@ -209,6 +215,7 @@ async def _relay_command_loop(relay_client: RelayClient, max_client) -> None:
                     if max_message_id:
                         try:
                             await relay_client.upsert_message_mapping(
+                                profile_id=profile_id,
                                 tg_chat_id=command.tg_chat_id,
                                 tg_message_id=command.tg_message_id,
                                 max_chat_id=command.max_chat_id,
@@ -272,7 +279,7 @@ async def _command_lease_maintenance_loop(
 
 async def _start_relay_http_server(
     settings,
-    processor: RelayBatchProcessor,
+    processor: RelayBatchProcessor | dict[str, RelayBatchProcessor],
     command_store: CommandStore,
     message_store: MessageStore,
 ) -> web.AppRunner:
@@ -287,6 +294,18 @@ async def _start_relay_http_server(
         settings.relay_bind_port,
     )
     return runner
+
+
+def _profile_max(profile: AccountProfile):
+    if profile.max is None:
+        raise RuntimeError(f"Profile {profile.id!r} has no Max settings")
+    return profile.max
+
+
+def _profile_telegram(profile: AccountProfile):
+    if profile.telegram is None:
+        raise RuntimeError(f"Profile {profile.id!r} has no Telegram settings")
+    return profile.telegram
 
 
 async def _run_max_bridge(settings) -> None:
@@ -318,8 +337,8 @@ async def _run_max_bridge(settings) -> None:
     if settings.relay_recovery_enabled:
         relay_client.set_recovery_hook(recovery_controller.recover)
 
-    sender = RelayStatusSender(relay_client)
-    command_task = None
+    command_tasks: list[asyncio.Task] = []
+    max_tasks: list[asyncio.Task] = []
     recovery_task = None
     try:
         if settings.remote_deploy_enabled:
@@ -329,32 +348,51 @@ async def _run_max_bridge(settings) -> None:
         await relay_client.wait_until_healthy()
         recovery_task = asyncio.create_task(recovery_controller.run_watchdog())
 
-        client = create_max_client(
-            settings.max_token,
-            settings.max_device_id,
-            sender=sender,
-            max_chat_ids=settings.max_chat_ids,
-            debug=settings.debug,
-            reply_enabled=settings.reply_enabled,
-            relay_client=relay_client,
+        for profile in settings.enabled_profiles:
+            max_settings = _profile_max(profile)
+            sender = RelayStatusSender(relay_client, profile_id=profile.id)
+            client = create_max_client(
+                max_settings.token,
+                max_settings.device_id,
+                sender=sender,
+                max_chat_ids=max_settings.chat_ids,
+                debug=settings.debug,
+                reply_enabled=settings.reply_enabled,
+                relay_client=relay_client,
+                profile_id=profile.id,
+            )
+            if settings.reply_enabled:
+                command_tasks.append(
+                    asyncio.create_task(
+                        _relay_command_loop(relay_client, client, profile_id=profile.id)
+                    )
+                )
+            max_tasks.append(asyncio.create_task(client.run()))
+
+        log.info(
+            "Starting %d Max listener(s) in APP_ROLE=max-bridge ...",
+            len(max_tasks),
         )
-
-        if settings.reply_enabled:
-            command_task = asyncio.create_task(_relay_command_loop(relay_client, client))
-
-        log.info("Starting Max listener in APP_ROLE=max-bridge ...")
-        await client.run()
+        await asyncio.gather(*max_tasks)
     finally:
+        for task in max_tasks:
+            task.cancel()
+        for task in max_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         if recovery_task is not None:
             recovery_task.cancel()
             try:
                 await recovery_task
             except asyncio.CancelledError:
                 pass
-        if command_task is not None:
-            command_task.cancel()
+        for task in command_tasks:
+            task.cancel()
+        for task in command_tasks:
             try:
-                await command_task
+                await task
             except asyncio.CancelledError:
                 pass
         await relay_client.stop()
@@ -362,32 +400,48 @@ async def _run_max_bridge(settings) -> None:
 
 
 async def _run_tg_relay(settings) -> None:
-    sender = TelegramSender(settings.tg_bot_token, settings.tg_chat_id)
-    await sender.start()
     topic_store = TopicStore(settings.topic_db_path)
     command_store = CommandStore(settings.command_db_path)
     message_store = MessageStore(settings.message_db_path)
-    topic_router = TopicRouter(topic_store, sender)
-    processor = RelayBatchProcessor(sender, topic_router, message_store)
-    http_runner = await _start_relay_http_server(settings, processor, command_store, message_store)
+    senders: list[TelegramSender] = []
+    processors: dict[str, RelayBatchProcessor] = {}
+    tg_apps = []
+
+    for profile in settings.enabled_profiles:
+        telegram = _profile_telegram(profile)
+        sender = TelegramSender(telegram.bot_token, telegram.chat_id)
+        await sender.start()
+        senders.append(sender)
+        topic_router = TopicRouter(topic_store, sender, profile_id=profile.id)
+        processors[profile.id] = RelayBatchProcessor(
+            sender,
+            topic_router,
+            message_store,
+            profile_id=profile.id,
+        )
+
+    http_runner = await _start_relay_http_server(settings, processors, command_store, message_store)
     lease_maintenance_task = asyncio.create_task(_command_lease_maintenance_loop(command_store))
 
-    tg_app = None
     if settings.reply_enabled:
-        tg_app = build_tg_app(
-            settings.tg_bot_token,
-            settings.tg_chat_id,
-            topic_store,
-            command_store=command_store,
-            message_store=message_store,
-        )
-        await tg_app.initialize()
-        await tg_app.start()
-        await tg_app.updater.start_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-        )
-        log.info("Telegram polling started on tg-relay")
+        for profile in settings.enabled_profiles:
+            telegram = _profile_telegram(profile)
+            tg_app = build_tg_app(
+                telegram.bot_token,
+                telegram.chat_id,
+                topic_store,
+                profile_id=profile.id,
+                command_store=command_store,
+                message_store=message_store,
+            )
+            await tg_app.initialize()
+            await tg_app.start()
+            await tg_app.updater.start_polling(
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+            )
+            tg_apps.append(tg_app)
+        log.info("Telegram polling started for %d profile(s) on tg-relay", len(tg_apps))
     else:
         log.info("Reply to Max disabled (REPLY_ENABLED=false)")
 
@@ -399,7 +453,7 @@ async def _run_tg_relay(settings) -> None:
             await lease_maintenance_task
         except asyncio.CancelledError:
             pass
-        if tg_app:
+        for tg_app in tg_apps:
             await tg_app.updater.stop()
             await tg_app.stop()
             await tg_app.shutdown()
@@ -407,7 +461,8 @@ async def _run_tg_relay(settings) -> None:
         command_store.close()
         topic_store.close()
         message_store.close()
-        await sender.stop()
+        for sender in senders:
+            await sender.stop()
 
 
 async def main():

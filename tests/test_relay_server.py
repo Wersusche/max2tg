@@ -42,6 +42,33 @@ async def _make_client(tmp_path):
     return client, sender, topic_store, command_store, message_store
 
 
+async def _make_profile_client(tmp_path):
+    sender_alpha = _make_sender()
+    sender_beta = _make_sender()
+    topic_store = TopicStore(str(tmp_path / "topics.sqlite3"))
+    command_store = CommandStore(str(tmp_path / "commands.sqlite3"))
+    message_store = MessageStore(str(tmp_path / "messages.sqlite3"))
+    processors = {
+        "alpha": RelayBatchProcessor(
+            sender_alpha,
+            TopicRouter(topic_store, sender_alpha, profile_id="alpha"),
+            message_store,
+            profile_id="alpha",
+        ),
+        "beta": RelayBatchProcessor(
+            sender_beta,
+            TopicRouter(topic_store, sender_beta, profile_id="beta"),
+            message_store,
+            profile_id="beta",
+        ),
+    }
+    app = create_relay_app(processors, command_store, message_store, "secret")
+    server = TestServer(app)
+    client = TestClient(server)
+    await client.start_server()
+    return client, sender_alpha, sender_beta, topic_store, command_store, message_store
+
+
 @pytest.mark.asyncio
 async def test_relay_rejects_invalid_secret(tmp_path):
     client, _sender, topic_store, command_store, message_store = await _make_client(tmp_path)
@@ -285,6 +312,72 @@ async def test_relay_skips_duplicate_max_message_id(tmp_path):
         stored = message_store.get_by_max_message(max_chat_id=42, max_message_id="max-42")
         assert stored is not None
         assert stored.tg_message_id == 7001
+    finally:
+        await client.close()
+        topic_store.close()
+        command_store.close()
+        message_store.close()
+
+
+@pytest.mark.asyncio
+async def test_relay_routes_batches_and_commands_by_profile(tmp_path):
+    client, sender_alpha, sender_beta, topic_store, command_store, message_store = await _make_profile_client(tmp_path)
+    sender_alpha.send = AsyncMock(return_value=SimpleNamespace(message_id=7001))
+    sender_beta.send = AsyncMock(return_value=SimpleNamespace(message_id=8001))
+    try:
+        alpha_batch = TelegramBatch(
+            profile_id="alpha",
+            max_chat_id="42",
+            topic_name="Alice",
+            max_message_id="max-1",
+            operations=[RelayOperation(kind="text", text="Alpha")],
+        )
+        beta_batch = TelegramBatch(
+            profile_id="beta",
+            max_chat_id="42",
+            topic_name="Alice",
+            max_message_id="max-1",
+            operations=[RelayOperation(kind="text", text="Beta")],
+        )
+
+        alpha_resp = await client.post(
+            "/internal/telegram-batch",
+            json=alpha_batch.to_dict(),
+            headers={"X-Relay-Secret": "secret"},
+        )
+        beta_resp = await client.post(
+            "/internal/telegram-batch",
+            json=beta_batch.to_dict(),
+            headers={"X-Relay-Secret": "secret"},
+        )
+
+        assert alpha_resp.status == 200
+        assert beta_resp.status == 200
+        sender_alpha.send.assert_awaited_once()
+        sender_beta.send.assert_awaited_once()
+        assert message_store.get_by_max_message(
+            profile_id="alpha",
+            max_chat_id=42,
+            max_message_id="max-1",
+        ).tg_message_id == 7001
+        assert message_store.get_by_max_message(
+            profile_id="beta",
+            max_chat_id=42,
+            max_message_id="max-1",
+        ).tg_message_id == 8001
+
+        command_store.enqueue(42, "Alpha reply", profile_id="alpha")
+        command_store.enqueue(42, "Beta reply", profile_id="beta")
+
+        beta_pull = await client.get(
+            "/internal/max-commands/pull",
+            params={"profile_id": "beta"},
+            headers={"X-Relay-Secret": "secret"},
+        )
+        assert beta_pull.status == 200
+        beta_payload = await beta_pull.json()
+        assert beta_payload["profile_id"] == "beta"
+        assert beta_payload["text"] == "Beta reply"
     finally:
         await client.close()
         topic_store.close()

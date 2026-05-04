@@ -6,6 +6,7 @@ APP_DIR=$(dirname "$SCRIPT_DIR")
 SECRETS_DIR="$APP_DIR/secrets"
 KEY_PATH="$SECRETS_DIR/foreign.key"
 RELAY_ENV_PATH="$SECRETS_DIR/relay.env"
+ACCOUNTS_CONFIG_PATH="$SECRETS_DIR/accounts.yaml"
 BRIDGE_ENV_PATH="$APP_DIR/.env"
 
 foreign_admin=""
@@ -357,12 +358,33 @@ write_env_files() {
     shared_secret="$(env_get "$BRIDGE_ENV_PATH" RELAY_SHARED_SECRET)"
     [ -n "$shared_secret" ] || shared_secret="$(random_secret)"
 
+    if [ ! -f "$ACCOUNTS_CONFIG_PATH" ]; then
+        log "Writing initial $ACCOUNTS_CONFIG_PATH"
+        cat > "$ACCOUNTS_CONFIG_PATH" <<EOF
+version: 1
+profiles:
+  - id: default
+    label: Default
+    enabled: true
+    max:
+      token: "$max_token"
+      device_id: "$max_device_id"
+      chat_ids: "$max_chat_ids"
+    telegram:
+      bot_token: "$tg_bot_token"
+      chat_id: "$tg_chat_id"
+EOF
+    else
+        log "Keeping existing $ACCOUNTS_CONFIG_PATH"
+    fi
+
     log "Writing $RELAY_ENV_PATH"
     cat > "$RELAY_ENV_PATH" <<EOF
 APP_ROLE=tg-relay
 RELAY_SHARED_SECRET=$shared_secret
 TG_BOT_TOKEN=$tg_bot_token
 TG_CHAT_ID=$tg_chat_id
+ACCOUNTS_CONFIG_FILE=/run/max2tg-secrets/accounts.yaml
 RELAY_BIND_HOST=0.0.0.0
 RELAY_BIND_PORT=8080
 TOPIC_DB_PATH=data/topics.sqlite3
@@ -382,6 +404,7 @@ RELAY_SHARED_SECRET=$shared_secret
 
 MAX_TOKEN=$max_token
 MAX_DEVICE_ID=$max_device_id
+ACCOUNTS_CONFIG_FILE=/run/max2tg-secrets/accounts.yaml
 REPLY_ENABLED=$reply_enabled
 DEBUG=$debug
 
@@ -399,7 +422,7 @@ EOF
         printf 'MAX_CHAT_IDS=%s\n' "$max_chat_ids" >> "$BRIDGE_ENV_PATH"
     fi
 
-    chmod 600 "$BRIDGE_ENV_PATH" "$RELAY_ENV_PATH" || true
+    chmod 600 "$BRIDGE_ENV_PATH" "$RELAY_ENV_PATH" "$ACCOUNTS_CONFIG_PATH" || true
 }
 
 prepare_foreign_host() {

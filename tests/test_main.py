@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import app.main as main_module
+from app.config import AccountProfile, MaxProfileSettings
 from app.main import _relay_command_loop, _run_max_bridge
 from app.relay_models import MaxCommand
 
@@ -51,6 +52,21 @@ def _bridge_settings(**overrides):
         "reply_enabled": False,
     }
     settings.update(overrides)
+    settings.setdefault(
+        "profiles",
+        (
+            AccountProfile(
+                id="default",
+                label="Default",
+                max=MaxProfileSettings(
+                    token=settings["max_token"],
+                    device_id=settings["max_device_id"],
+                    chat_ids=settings["max_chat_ids"],
+                ),
+            ),
+        ),
+    )
+    settings.setdefault("enabled_profiles", settings["profiles"])
     return SimpleNamespace(**settings)
 
 
@@ -196,6 +212,7 @@ async def test_relay_command_loop_stores_tg_to_max_mapping_after_success():
         reply_to_max_message_id="max-1",
     )
     relay_client.upsert_message_mapping.assert_awaited_once_with(
+        profile_id="default",
         tg_chat_id=-100,
         tg_message_id=7001,
         max_chat_id="42",
@@ -206,6 +223,35 @@ async def test_relay_command_loop_stores_tg_to_max_mapping_after_success():
     )
     relay_client.ack_command.assert_awaited_once_with(2)
     relay_client.fail_command.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_relay_command_loop_pulls_and_sends_for_profile():
+    relay_client = MagicMock()
+    relay_client.pull_command = AsyncMock(
+        side_effect=[
+            MaxCommand(id=5, profile_id="beta", max_chat_id="42", kind="text", text="beta reply"),
+            asyncio.CancelledError(),
+        ]
+    )
+    relay_client.ack_command = AsyncMock(return_value=None)
+    relay_client.fail_command = AsyncMock(return_value={"ok": True, "attempt_count": 1, "dead_lettered": False})
+    relay_client.upsert_message_mapping = AsyncMock(return_value=None)
+
+    max_client = MagicMock()
+    max_client.send_message = AsyncMock(return_value={"message": {"id": "max-beta"}})
+
+    with pytest.raises(asyncio.CancelledError):
+        await _relay_command_loop(relay_client, max_client, profile_id="beta")
+
+    relay_client.pull_command.assert_any_await(timeout_seconds=30, profile_id="beta")
+    max_client.send_message.assert_awaited_once_with(
+        42,
+        "beta reply",
+        [],
+        reply_to_max_message_id=None,
+    )
+    relay_client.ack_command.assert_awaited_once_with(5)
 
 
 @pytest.mark.asyncio
