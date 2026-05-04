@@ -452,6 +452,36 @@ class TestRelayQueueMode:
         message_store.close()
 
     @pytest.mark.asyncio
+    async def test_topic_message_enqueues_command_for_configured_profile(self, tmp_path):
+        topic_store = TopicStore(str(tmp_path / "topics.sqlite3"))
+        command_store = CommandStore(str(tmp_path / "commands.sqlite3"))
+        message_store = MessageStore(str(tmp_path / "messages.sqlite3"))
+        topic_store.upsert_mapping(-100, 42, 10, "Default Alice")
+        topic_store.upsert_mapping(-100, 42, 20, "Beta Alice", profile_id="beta")
+        ctx = _make_context(
+            bot_data={
+                "allowed_chat_id": -100,
+                "profile_id": "beta",
+                "topic_store": topic_store,
+                "message_store": message_store,
+                "command_store": command_store,
+            }
+        )
+        update = _make_topic_update(text="Hello beta", user_name="Bob", thread_id=20)
+
+        await _on_topic_message(update, ctx)
+
+        assert command_store.lease_next(profile_id="default") is None
+        queued = command_store.lease_next(profile_id="beta")
+        assert queued is not None
+        assert queued.profile_id == "beta"
+        assert queued.max_chat_id == "42"
+        assert "Hello beta" in queued.text
+        topic_store.close()
+        command_store.close()
+        message_store.close()
+
+    @pytest.mark.asyncio
     async def test_topic_message_without_reply_mapping_enqueues_fallback_quote(self, tmp_path):
         topic_store = TopicStore(str(tmp_path / "topics.sqlite3"))
         command_store = CommandStore(str(tmp_path / "commands.sqlite3"))

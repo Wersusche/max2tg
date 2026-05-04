@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.config import DEFAULT_PROFILE_ID
+
 
 @dataclass(frozen=True)
 class MessageMapping:
@@ -16,6 +18,7 @@ class MessageMapping:
     message_thread_id: int | None
     direction: str
     source: str
+    profile_id: str = DEFAULT_PROFILE_ID
 
 
 class MessageStore:
@@ -36,9 +39,12 @@ class MessageStore:
 
     def _migrate(self) -> None:
         with self._lock:
+            if self._needs_rebuild():
+                self._rebuild_with_profile_id()
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS message_mappings (
+                    profile_id TEXT NOT NULL DEFAULT 'default',
                     tg_chat_id INTEGER NOT NULL,
                     max_chat_id TEXT NOT NULL,
                     max_message_id TEXT NOT NULL,
@@ -48,16 +54,80 @@ class MessageStore:
                     source TEXT NOT NULL DEFAULT 'max',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (direction, max_chat_id, max_message_id),
-                    UNIQUE (tg_chat_id, tg_message_id)
+                    PRIMARY KEY (profile_id, direction, max_chat_id, max_message_id),
+                    UNIQUE (profile_id, tg_chat_id, tg_message_id)
                 )
                 """
             )
             self._conn.commit()
 
+    def _needs_rebuild(self) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'message_mappings'"
+        ).fetchone()
+        if row is None:
+            return False
+        columns = {
+            str(item["name"])
+            for item in self._conn.execute("PRAGMA table_info(message_mappings)").fetchall()
+        }
+        return "profile_id" not in columns
+
+    def _rebuild_with_profile_id(self) -> None:
+        self._conn.execute("ALTER TABLE message_mappings RENAME TO message_mappings_legacy")
+        self._conn.execute(
+            """
+            CREATE TABLE message_mappings (
+                profile_id TEXT NOT NULL DEFAULT 'default',
+                tg_chat_id INTEGER NOT NULL,
+                max_chat_id TEXT NOT NULL,
+                max_message_id TEXT NOT NULL,
+                tg_message_id INTEGER NOT NULL,
+                message_thread_id INTEGER NULL,
+                direction TEXT NOT NULL DEFAULT 'max_to_tg',
+                source TEXT NOT NULL DEFAULT 'max',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (profile_id, direction, max_chat_id, max_message_id),
+                UNIQUE (profile_id, tg_chat_id, tg_message_id)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO message_mappings (
+                profile_id,
+                tg_chat_id,
+                max_chat_id,
+                max_message_id,
+                tg_message_id,
+                message_thread_id,
+                direction,
+                source,
+                created_at,
+                updated_at
+            )
+            SELECT
+                'default',
+                tg_chat_id,
+                max_chat_id,
+                max_message_id,
+                tg_message_id,
+                message_thread_id,
+                direction,
+                source,
+                created_at,
+                updated_at
+            FROM message_mappings_legacy
+            """
+        )
+        self._conn.execute("DROP TABLE message_mappings_legacy")
+        self._conn.commit()
+
     def upsert_mapping(
         self,
         *,
+        profile_id: str = DEFAULT_PROFILE_ID,
         tg_chat_id: int,
         max_chat_id: Any,
         max_message_id: Any,
@@ -67,6 +137,7 @@ class MessageStore:
         source: str = "max",
     ) -> MessageMapping:
         mapping = MessageMapping(
+            profile_id=str(profile_id or DEFAULT_PROFILE_ID),
             tg_chat_id=int(tg_chat_id),
             max_chat_id=str(max_chat_id),
             max_message_id=str(max_message_id),
@@ -79,6 +150,7 @@ class MessageStore:
             self._conn.execute(
                 """
                 INSERT INTO message_mappings (
+                    profile_id,
                     tg_chat_id,
                     max_chat_id,
                     max_message_id,
@@ -87,8 +159,8 @@ class MessageStore:
                     direction,
                     source
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(direction, max_chat_id, max_message_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(profile_id, direction, max_chat_id, max_message_id)
                 DO UPDATE SET
                     tg_chat_id = excluded.tg_chat_id,
                     tg_message_id = excluded.tg_message_id,
@@ -97,6 +169,7 @@ class MessageStore:
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (
+                    mapping.profile_id,
                     mapping.tg_chat_id,
                     mapping.max_chat_id,
                     mapping.max_message_id,
@@ -112,6 +185,7 @@ class MessageStore:
     def get_by_max_message(
         self,
         *,
+        profile_id: str = DEFAULT_PROFILE_ID,
         max_chat_id: Any,
         max_message_id: Any,
         direction: str | None = "max_to_tg",
@@ -121,6 +195,7 @@ class MessageStore:
                 row = self._conn.execute(
                     """
                     SELECT
+                        profile_id,
                         tg_chat_id,
                         max_chat_id,
                         max_message_id,
@@ -129,16 +204,17 @@ class MessageStore:
                         direction,
                         source
                     FROM message_mappings
-                    WHERE max_chat_id = ? AND max_message_id = ?
+                    WHERE profile_id = ? AND max_chat_id = ? AND max_message_id = ?
                     ORDER BY updated_at DESC, created_at DESC
                     LIMIT 1
                     """,
-                    (str(max_chat_id), str(max_message_id)),
+                    (str(profile_id or DEFAULT_PROFILE_ID), str(max_chat_id), str(max_message_id)),
                 ).fetchone()
             else:
                 row = self._conn.execute(
                     """
                     SELECT
+                        profile_id,
                         tg_chat_id,
                         max_chat_id,
                         max_message_id,
@@ -147,15 +223,16 @@ class MessageStore:
                         direction,
                         source
                     FROM message_mappings
-                    WHERE direction = ? AND max_chat_id = ? AND max_message_id = ?
+                    WHERE profile_id = ? AND direction = ? AND max_chat_id = ? AND max_message_id = ?
                     """,
-                    (str(direction), str(max_chat_id), str(max_message_id)),
+                    (str(profile_id or DEFAULT_PROFILE_ID), str(direction), str(max_chat_id), str(max_message_id)),
                 ).fetchone()
         return self._row_to_mapping(row)
 
     def get_by_tg_message(
         self,
         *,
+        profile_id: str = DEFAULT_PROFILE_ID,
         tg_chat_id: int,
         tg_message_id: int,
     ) -> MessageMapping | None:
@@ -163,6 +240,7 @@ class MessageStore:
             row = self._conn.execute(
                 """
                 SELECT
+                    profile_id,
                     tg_chat_id,
                     max_chat_id,
                     max_message_id,
@@ -171,9 +249,9 @@ class MessageStore:
                     direction,
                     source
                 FROM message_mappings
-                WHERE tg_chat_id = ? AND tg_message_id = ?
+                WHERE profile_id = ? AND tg_chat_id = ? AND tg_message_id = ?
                 """,
-                (int(tg_chat_id), int(tg_message_id)),
+                (str(profile_id or DEFAULT_PROFILE_ID), int(tg_chat_id), int(tg_message_id)),
             ).fetchone()
         return self._row_to_mapping(row)
 
@@ -182,6 +260,7 @@ class MessageStore:
         if row is None:
             return None
         return MessageMapping(
+            profile_id=str(row["profile_id"]),
             tg_chat_id=int(row["tg_chat_id"]),
             max_chat_id=str(row["max_chat_id"]),
             max_message_id=str(row["max_message_id"]),

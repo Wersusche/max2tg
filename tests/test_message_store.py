@@ -57,3 +57,29 @@ def test_lookup_by_max_message_without_direction_finds_tg_to_max(tmp_path):
     assert loaded.direction == "tg_to_max"
     assert loaded.tg_message_id == 7003
     store.close()
+
+
+def test_profiles_isolate_same_max_and_tg_message_ids(tmp_path):
+    store = _make_store(tmp_path)
+    alpha = store.upsert_mapping(
+        profile_id="alpha",
+        tg_chat_id=-100,
+        max_chat_id=42,
+        max_message_id="max-1",
+        tg_message_id=7001,
+        message_thread_id=55,
+    )
+    beta = store.upsert_mapping(
+        profile_id="beta",
+        tg_chat_id=-100,
+        max_chat_id=42,
+        max_message_id="max-1",
+        tg_message_id=7001,
+        message_thread_id=77,
+    )
+
+    assert store.get_by_max_message(profile_id="alpha", max_chat_id=42, max_message_id="max-1") == alpha
+    assert store.get_by_max_message(profile_id="beta", max_chat_id=42, max_message_id="max-1") == beta
+    assert store.get_by_tg_message(profile_id="alpha", tg_chat_id=-100, tg_message_id=7001) == alpha
+    assert store.get_by_tg_message(profile_id="beta", tg_chat_id=-100, tg_message_id=7001) == beta
+    store.close()

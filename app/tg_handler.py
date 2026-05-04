@@ -6,6 +6,7 @@ import telegram.constants
 from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
+from app.config import DEFAULT_PROFILE_ID
 from app.command_store import CommandStore
 from app.max_client import MaxClient
 from app.message_store import MessageStore
@@ -17,6 +18,7 @@ _ALLOWED_CHAT_ID_KEY = "allowed_chat_id"
 _TOPIC_STORE_KEY = "topic_store"
 _COMMAND_STORE_KEY = "command_store"
 _MESSAGE_STORE_KEY = "message_store"
+_PROFILE_ID_KEY = "profile_id"
 
 
 def _parse_max_chat_id(value: str):
@@ -156,6 +158,7 @@ def _resolve_reply_target(
     *,
     message,
     message_store: MessageStore | None,
+    profile_id: str,
     tg_chat_id: int,
     current_max_chat_id: str,
 ) -> tuple[str | None, str | None]:
@@ -170,6 +173,7 @@ def _resolve_reply_target(
         return None, _build_reply_preview(replied_message)
 
     mapping = message_store.get_by_tg_message(
+        profile_id=profile_id,
         tg_chat_id=tg_chat_id,
         tg_message_id=int(tg_message_id),
     )
@@ -182,6 +186,7 @@ def _resolve_reply_target(
 def _store_direct_message_mapping(
     *,
     message_store: MessageStore | None,
+    profile_id: str,
     tg_chat_id: int,
     tg_message_id: int | None,
     max_chat_id: str,
@@ -196,6 +201,7 @@ def _store_direct_message_mapping(
         return
 
     message_store.upsert_mapping(
+        profile_id=profile_id,
         tg_chat_id=tg_chat_id,
         max_chat_id=max_chat_id,
         max_message_id=max_message_id,
@@ -268,11 +274,16 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     topic_store: TopicStore | None = context.bot_data.get(_TOPIC_STORE_KEY)
+    profile_id = str(context.bot_data.get(_PROFILE_ID_KEY) or DEFAULT_PROFILE_ID)
     if topic_store is None:
         await message.reply_text("⚠️ Хранилище топиков не подключено.")
         return
 
-    mapping = topic_store.get_by_thread(int(allowed_chat_id), int(message_thread_id))
+    mapping = topic_store.get_by_thread(
+        int(allowed_chat_id),
+        int(message_thread_id),
+        profile_id=profile_id,
+    )
     if mapping is None:
         if _message_text_or_caption(update) or _has_photo(message) or _has_document(message):
             await message.reply_text(
@@ -293,6 +304,7 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     reply_to_max_message_id, reply_fallback_preview = _resolve_reply_target(
         message=message,
         message_store=message_store,
+        profile_id=profile_id,
         tg_chat_id=int(allowed_chat_id),
         current_max_chat_id=str(mapping.max_chat_id),
     )
@@ -326,6 +338,7 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 )
                 _store_direct_message_mapping(
                     message_store=message_store,
+                    profile_id=profile_id,
                     tg_chat_id=int(allowed_chat_id),
                     tg_message_id=outbound_tg_message_id,
                     max_chat_id=str(mapping.max_chat_id),
@@ -340,6 +353,7 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     elements=elements,
                     filename=filename,
                     reply_to_max_message_id=reply_to_max_message_id,
+                    profile_id=profile_id,
                     tg_chat_id=int(allowed_chat_id),
                     tg_message_id=outbound_tg_message_id,
                     message_thread_id=int(message_thread_id),
@@ -384,6 +398,7 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 )
                 _store_direct_message_mapping(
                     message_store=message_store,
+                    profile_id=profile_id,
                     tg_chat_id=int(allowed_chat_id),
                     tg_message_id=outbound_tg_message_id,
                     max_chat_id=str(mapping.max_chat_id),
@@ -398,6 +413,7 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     elements=elements,
                     filename=filename,
                     reply_to_max_message_id=reply_to_max_message_id,
+                    profile_id=profile_id,
                     tg_chat_id=int(allowed_chat_id),
                     tg_message_id=outbound_tg_message_id,
                     message_thread_id=int(message_thread_id),
@@ -431,6 +447,7 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             _store_direct_message_mapping(
                 message_store=message_store,
+                profile_id=profile_id,
                 tg_chat_id=int(allowed_chat_id),
                 tg_message_id=outbound_tg_message_id,
                 max_chat_id=str(mapping.max_chat_id),
@@ -443,6 +460,7 @@ async def _on_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 text,
                 elements,
                 reply_to_max_message_id=reply_to_max_message_id,
+                profile_id=profile_id,
                 tg_chat_id=int(allowed_chat_id),
                 tg_message_id=outbound_tg_message_id,
                 message_thread_id=int(message_thread_id),
@@ -468,6 +486,7 @@ def build_tg_app(
     allowed_chat_id: str,
     topic_store: TopicStore,
     *,
+    profile_id: str = DEFAULT_PROFILE_ID,
     command_store: CommandStore | None = None,
     max_client: MaxClient | None = None,
     message_store: MessageStore | None = None,
@@ -479,6 +498,7 @@ def build_tg_app(
         app.bot_data[_COMMAND_STORE_KEY] = command_store
     if message_store is not None:
         app.bot_data[_MESSAGE_STORE_KEY] = message_store
+    app.bot_data[_PROFILE_ID_KEY] = str(profile_id or DEFAULT_PROFILE_ID)
     app.bot_data[_ALLOWED_CHAT_ID_KEY] = int(allowed_chat_id)
     app.bot_data[_TOPIC_STORE_KEY] = topic_store
 

@@ -7,6 +7,7 @@ from typing import Any
 
 from telegram.error import BadRequest
 
+from app.config import DEFAULT_PROFILE_ID
 from app.tg_sender import TelegramSender
 from app.topic_store import TopicStore
 
@@ -18,17 +19,28 @@ MAX_TOPIC_NAME_LENGTH = 128
 class TopicRouter:
     """Create and reuse Telegram forum topics for Max chats."""
 
-    def __init__(self, store: TopicStore, sender: TelegramSender):
+    def __init__(
+        self,
+        store: TopicStore,
+        sender: TelegramSender,
+        *,
+        profile_id: str = DEFAULT_PROFILE_ID,
+    ):
         self.store = store
         self.sender = sender
         self.tg_chat_id = int(sender.chat_id)
+        self.profile_id = str(profile_id or DEFAULT_PROFILE_ID)
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def ensure_topic(self, max_chat_id: Any, display_name: str) -> int:
         max_key = str(max_chat_id)
         lock = self._locks.setdefault(max_key, asyncio.Lock())
         async with lock:
-            mapping = self.store.get_by_max_chat(self.tg_chat_id, max_key)
+            mapping = self.store.get_by_max_chat(
+                self.tg_chat_id,
+                max_key,
+                profile_id=self.profile_id,
+            )
             topic_name = self._unique_topic_name(display_name, max_key)
 
             if mapping:
@@ -51,6 +63,7 @@ class TopicRouter:
                             max_key,
                             mapping.message_thread_id,
                             topic_name,
+                            profile_id=self.profile_id,
                         )
                 return mapping.message_thread_id
 
@@ -73,6 +86,7 @@ class TopicRouter:
                 max_key,
                 topic.message_thread_id,
                 topic_name,
+                profile_id=self.profile_id,
             )
             log.info(
                 "Created Telegram topic %s for Max chat %s (%s)",
@@ -83,11 +97,16 @@ class TopicRouter:
             return int(topic.message_thread_id)
 
     def forget_max_chat(self, max_chat_id: Any) -> None:
-        self.store.delete_by_max_chat(self.tg_chat_id, max_chat_id)
+        self.store.delete_by_max_chat(self.tg_chat_id, max_chat_id, profile_id=self.profile_id)
 
     def _unique_topic_name(self, display_name: str, max_key: str) -> str:
         base = _clean_topic_name(display_name, max_key)
-        if not self.store.topic_name_exists(self.tg_chat_id, base, exclude_max_chat_id=max_key):
+        if not self.store.topic_name_exists(
+            self.tg_chat_id,
+            base,
+            exclude_max_chat_id=max_key,
+            profile_id=self.profile_id,
+        ):
             return base
 
         suffix = f" [{max_key}]"

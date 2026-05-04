@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime
 
+from app.config import DEFAULT_PROFILE_ID
 from app.max_client import MaxClient
 from app.max_forwarder import _guess_media_kind, _human_size, forward_max_message
 from app.message_store import MessageStore
@@ -24,9 +25,11 @@ def create_max_client(
     topic_router: TopicRouter | None = None,
     relay_client: RelayClient | None = None,
     message_store: MessageStore | None = None,
+    profile_id: str = DEFAULT_PROFILE_ID,
 ) -> MaxClient:
     del reply_enabled
 
+    profile_id = str(profile_id or DEFAULT_PROFILE_ID)
     client = MaxClient(token=max_token, device_id=max_device_id, debug=debug, chat_ids=max_chat_ids)
     resolver = ContactResolver(client=client)
 
@@ -127,6 +130,7 @@ def create_max_client(
             client=client,
             sender=sender,
             resolver=resolver,
+            profile_id=profile_id,
             topic_router=topic_router,
             relay_client=relay_client,
             message_store=message_store,

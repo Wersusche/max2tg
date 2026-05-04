@@ -5,6 +5,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.config import DEFAULT_PROFILE_ID
+
 
 @dataclass(frozen=True)
 class RelayOperation:
@@ -37,6 +39,7 @@ class RelayOperation:
 class TelegramBatch:
     max_chat_id: str
     topic_name: str | None
+    profile_id: str = DEFAULT_PROFILE_ID
     max_message_id: str | None = None
     reply_to_message_id: int | None = None
     mapping_operation_index: int | None = None
@@ -44,6 +47,7 @@ class TelegramBatch:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "profile_id": self.profile_id,
             "max_chat_id": self.max_chat_id,
             "topic_name": self.topic_name,
             "max_message_id": self.max_message_id,
@@ -59,6 +63,7 @@ class TelegramBatch:
     def from_dict(cls, payload: dict[str, Any]) -> "TelegramBatch":
         operations = [RelayOperation.from_dict(item) for item in payload.get("operations", [])]
         return cls(
+            profile_id=str(payload.get("profile_id") or DEFAULT_PROFILE_ID),
             max_chat_id=str(payload["max_chat_id"]),
             topic_name=payload.get("topic_name"),
             max_message_id=str(payload["max_message_id"]) if payload.get("max_message_id") is not None else None,
@@ -73,6 +78,7 @@ class MaxCommand:
     id: int
     max_chat_id: str
     text: str
+    profile_id: str = DEFAULT_PROFILE_ID
     kind: str = "text"
     elements: list[dict[str, Any]] = field(default_factory=list)
     filename: str | None = None
@@ -86,6 +92,7 @@ class MaxCommand:
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "id": self.id,
+            "profile_id": self.profile_id,
             "max_chat_id": self.max_chat_id,
             "kind": self.kind,
             "text": self.text,
@@ -111,6 +118,7 @@ class MaxCommand:
         attachment_b64 = payload.get("attachment_b64")
         return cls(
             id=int(payload["id"]),
+            profile_id=str(payload.get("profile_id") or DEFAULT_PROFILE_ID),
             max_chat_id=str(payload["max_chat_id"]),
             kind=str(payload.get("kind") or "text"),
             text=str(payload["text"]),
@@ -219,11 +227,13 @@ class RelayOperationBuilder:
         max_chat_id: Any,
         topic_name: str | None,
         *,
+        profile_id: str = DEFAULT_PROFILE_ID,
         max_message_id: Any | None = None,
         reply_to_message_id: int | None = None,
         mapping_operation_index: int | None = None,
     ) -> TelegramBatch:
         return TelegramBatch(
+            profile_id=str(profile_id or DEFAULT_PROFILE_ID),
             max_chat_id=str(max_chat_id),
             topic_name=topic_name,
             max_message_id=str(max_message_id) if max_message_id is not None else None,

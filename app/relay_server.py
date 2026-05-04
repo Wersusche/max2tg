@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from aiohttp import web
 from telegram.error import BadRequest
 
+from app.config import DEFAULT_PROFILE_ID
 from app.command_store import CommandStore
 from app.message_store import MessageStore
 from app.relay_client import SECRET_HEADER
@@ -28,19 +30,29 @@ def _is_missing_topic_error(exc: BadRequest) -> bool:
 def _get_existing_max_mapping(
     message_store: MessageStore,
     *,
+    profile_id: str,
     max_chat_id: Any,
     max_message_id: str | None,
 ):
     if not max_message_id:
         return None
     return message_store.get_by_max_message(
+        profile_id=profile_id,
         max_chat_id=max_chat_id,
         max_message_id=max_message_id,
     )
 
 
 class RelayBatchProcessor:
-    def __init__(self, sender: TelegramSender, topic_router: TopicRouter, message_store: MessageStore):
+    def __init__(
+        self,
+        sender: TelegramSender,
+        topic_router: TopicRouter,
+        message_store: MessageStore,
+        *,
+        profile_id: str = DEFAULT_PROFILE_ID,
+    ):
+        self.profile_id = str(profile_id or DEFAULT_PROFILE_ID)
         self.sender = sender
         self.topic_router = topic_router
         self.message_store = message_store
@@ -53,6 +65,7 @@ class RelayBatchProcessor:
         attachments = attachments or {}
         existing_mapping = _get_existing_max_mapping(
             self.message_store,
+            profile_id=self.profile_id,
             max_chat_id=batch.max_chat_id,
             max_message_id=batch.max_message_id,
         )
@@ -191,6 +204,7 @@ class RelayBatchProcessor:
             return
         self.message_store.upsert_mapping(
             tg_chat_id=int(self.sender.chat_id),
+            profile_id=self.profile_id,
             max_chat_id=batch.max_chat_id,
             max_message_id=batch.max_message_id,
             tg_message_id=tg_message_id,
@@ -200,20 +214,20 @@ class RelayBatchProcessor:
         )
 
 
-PROCESSOR_KEY = web.AppKey("processor", RelayBatchProcessor)
+PROCESSORS_KEY = web.AppKey("processors", dict[str, RelayBatchProcessor])
 COMMAND_STORE_KEY = web.AppKey("command_store", CommandStore)
 MESSAGE_STORE_KEY = web.AppKey("message_store", MessageStore)
 SHARED_SECRET_KEY = web.AppKey("shared_secret", str)
 
 
 def create_relay_app(
-    processor: RelayBatchProcessor,
+    processor: RelayBatchProcessor | Mapping[str, RelayBatchProcessor],
     command_store: CommandStore,
     message_store: MessageStore,
     shared_secret: str,
 ) -> web.Application:
     app = web.Application()
-    app[PROCESSOR_KEY] = processor
+    app[PROCESSORS_KEY] = _normalize_processors(processor)
     app[COMMAND_STORE_KEY] = command_store
     app[MESSAGE_STORE_KEY] = message_store
     app[SHARED_SECRET_KEY] = shared_secret
@@ -228,13 +242,29 @@ def create_relay_app(
     return app
 
 
+def _normalize_processors(
+    processor: RelayBatchProcessor | Mapping[str, RelayBatchProcessor],
+) -> dict[str, RelayBatchProcessor]:
+    if isinstance(processor, RelayBatchProcessor):
+        return {processor.profile_id: processor}
+    return {str(profile_id): item for profile_id, item in processor.items()}
+
+
+def _processor_for(request: web.Request, profile_id: str) -> RelayBatchProcessor:
+    processors = request.app[PROCESSORS_KEY]
+    normalized_profile_id = str(profile_id or DEFAULT_PROFILE_ID)
+    processor = processors.get(normalized_profile_id)
+    if processor is None:
+        raise web.HTTPNotFound(text=f"unknown profile_id: {normalized_profile_id}")
+    return processor
+
+
 async def _healthz(_request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
 async def _telegram_batch(request: web.Request) -> web.Response:
     _authorize(request)
-    processor = request.app[PROCESSOR_KEY]
 
     if request.content_type.startswith("multipart/"):
         payload, attachments = await _read_multipart_batch(request)
@@ -243,6 +273,7 @@ async def _telegram_batch(request: web.Request) -> web.Response:
         attachments = {}
 
     batch = TelegramBatch.from_dict(payload)
+    processor = _processor_for(request, batch.profile_id)
     await processor.process_batch(batch, attachments)
     return web.json_response({"ok": True})
 
@@ -251,7 +282,8 @@ async def _pull_max_command(request: web.Request) -> web.Response:
     _authorize(request)
     command_store = request.app[COMMAND_STORE_KEY]
     timeout = _float_query(request, "timeout", 30.0)
-    command = await command_store.wait_for_command(timeout)
+    profile_id = request.query.get("profile_id") or DEFAULT_PROFILE_ID
+    command = await command_store.wait_for_command(timeout, profile_id=profile_id)
     if command is None:
         return web.Response(status=204)
     return web.json_response(command.to_dict())
@@ -294,6 +326,7 @@ async def _upsert_message_mapping(request: web.Request) -> web.Response:
     message_store = request.app[MESSAGE_STORE_KEY]
     payload = await request.json()
     message_store.upsert_mapping(
+        profile_id=str(payload.get("profile_id") or DEFAULT_PROFILE_ID),
         tg_chat_id=int(payload["tg_chat_id"]),
         max_chat_id=payload["max_chat_id"],
         max_message_id=payload["max_message_id"],
@@ -310,10 +343,12 @@ async def _lookup_message_mapping(request: web.Request) -> web.Response:
     message_store = request.app[MESSAGE_STORE_KEY]
     max_chat_id = request.query.get("max_chat_id")
     max_message_id = request.query.get("max_message_id")
+    profile_id = request.query.get("profile_id") or DEFAULT_PROFILE_ID
     if not max_chat_id or not max_message_id:
         raise web.HTTPBadRequest(text="max_chat_id and max_message_id are required")
 
     mapping = message_store.get_by_max_message(
+        profile_id=profile_id,
         max_chat_id=max_chat_id,
         max_message_id=max_message_id,
         direction=None,
@@ -322,6 +357,7 @@ async def _lookup_message_mapping(request: web.Request) -> web.Response:
         raise web.HTTPNotFound(text="message mapping not found")
     return web.json_response(
         {
+            "profile_id": mapping.profile_id,
             "tg_chat_id": mapping.tg_chat_id,
             "tg_message_id": mapping.tg_message_id,
             "message_thread_id": mapping.message_thread_id,

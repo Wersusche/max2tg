@@ -140,3 +140,20 @@ def test_mark_failed_requeues_then_dead_letters_after_max_attempts(tmp_path):
     assert row["failed_at"] is not None
     assert row["last_error"] == "permanent"
     store.close()
+
+
+def test_lease_next_filters_by_profile(tmp_path):
+    store = _make_store(tmp_path)
+    alpha = store.enqueue(42, "alpha", profile_id="alpha")
+    beta = store.enqueue(42, "beta", profile_id="beta")
+
+    leased_beta = store.lease_next(profile_id="beta")
+    assert leased_beta is not None
+    assert leased_beta.id == beta.id
+    assert leased_beta.profile_id == "beta"
+
+    leased_alpha = store.lease_next(profile_id="alpha")
+    assert leased_alpha is not None
+    assert leased_alpha.id == alpha.id
+    assert leased_alpha.profile_id == "alpha"
+    store.close()

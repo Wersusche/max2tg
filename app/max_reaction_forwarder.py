@@ -29,6 +29,7 @@ async def forward_max_reaction(
         return
 
     mapping = message_store.get_by_max_message(
+        profile_id=event.profile_id,
         max_chat_id=event.target_chat_id,
         max_message_id=event.target_message_id,
         direction=None,
