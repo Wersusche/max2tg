@@ -93,6 +93,11 @@ class TestSettingsDataclass:
         assert settings.relay_tunnel_local_port == 18080
         assert settings.foreign_app_dir == "/home/relay/max2tg"
         assert settings.foreign_relay_host_port == 8080
+        assert settings.relay_recovery_enabled is True
+        assert settings.relay_recovery_health_interval_seconds == 30
+        assert settings.relay_recovery_redeploy_after_failures == 3
+        assert settings.relay_recovery_redeploy_cooldown_seconds == 600
+        assert settings.relay_recovery_max_wait_seconds == 120
 
 
 class TestLoadSettingsMaxBridge:
@@ -194,6 +199,23 @@ class TestLoadSettingsMaxBridge:
         )
         assert settings.remote_deploy_enabled is False
         assert settings.foreign_relay_env_b64 is None
+
+    def test_bridge_reads_relay_recovery_settings(self):
+        settings = _load_settings_with_env(
+            _bridge_env(
+                RELAY_RECOVERY_ENABLED="false",
+                RELAY_RECOVERY_HEALTH_INTERVAL_SECONDS="5",
+                RELAY_RECOVERY_REDEPLOY_AFTER_FAILURES="2",
+                RELAY_RECOVERY_REDEPLOY_COOLDOWN_SECONDS="60",
+                RELAY_RECOVERY_MAX_WAIT_SECONDS="7",
+            )
+        )
+
+        assert settings.relay_recovery_enabled is False
+        assert settings.relay_recovery_health_interval_seconds == 5
+        assert settings.relay_recovery_redeploy_after_failures == 2
+        assert settings.relay_recovery_redeploy_cooldown_seconds == 60
+        assert settings.relay_recovery_max_wait_seconds == 7
 
     def test_multiline_private_key_is_preserved(self):
         settings = _load_settings_with_env(_bridge_env(FOREIGN_SSH_PRIVATE_KEY=OPENSSH_PRIVATE_KEY))

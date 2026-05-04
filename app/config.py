@@ -39,6 +39,11 @@ class Settings:
     foreign_ssh_private_key_file: str | None = None
     foreign_app_dir: str = "/home/relay/max2tg"
     remote_deploy_enabled: bool = True
+    relay_recovery_enabled: bool = True
+    relay_recovery_health_interval_seconds: int = 30
+    relay_recovery_redeploy_after_failures: int = 3
+    relay_recovery_redeploy_cooldown_seconds: int = 600
+    relay_recovery_max_wait_seconds: int = 120
     foreign_relay_env_b64: str | None = None
     foreign_relay_env_file: str | None = None
     foreign_relay_env_content: str | None = None
@@ -232,6 +237,11 @@ def load_settings() -> Settings:
         foreign_ssh_private_key_file=foreign_ssh_private_key_file,
         foreign_app_dir=env.get("FOREIGN_APP_DIR") or "/home/relay/max2tg",
         remote_deploy_enabled=_env_flag("REMOTE_DEPLOY_ENABLED", default=True),
+        relay_recovery_enabled=_env_flag("RELAY_RECOVERY_ENABLED", default=True),
+        relay_recovery_health_interval_seconds=_env_int("RELAY_RECOVERY_HEALTH_INTERVAL_SECONDS", 30),
+        relay_recovery_redeploy_after_failures=_env_int("RELAY_RECOVERY_REDEPLOY_AFTER_FAILURES", 3),
+        relay_recovery_redeploy_cooldown_seconds=_env_int("RELAY_RECOVERY_REDEPLOY_COOLDOWN_SECONDS", 600),
+        relay_recovery_max_wait_seconds=_env_int("RELAY_RECOVERY_MAX_WAIT_SECONDS", 120),
         foreign_relay_env_b64=foreign_relay_env_b64,
         foreign_relay_env_file=foreign_relay_env_file,
         foreign_relay_env_content=foreign_relay_env_text,

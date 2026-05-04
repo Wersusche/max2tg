@@ -15,6 +15,7 @@ from app.config import APP_ROLE_MAX_BRIDGE, APP_ROLE_TG_RELAY, load_settings
 from app.max_listener import create_max_client
 from app.message_store import MessageStore
 from app.relay_client import RelayClient, RelayStatusSender
+from app.relay_recovery import RelayRecoveryController
 from app.relay_server import RelayBatchProcessor, create_relay_app
 from app.remote_deploy import RemoteRelayManager
 from app.tg_handler import build_tg_app
@@ -304,15 +305,29 @@ async def _run_max_bridge(settings) -> None:
         workspace_dir=str(APP_ROOT_DIR),
         remote_deploy_enabled=settings.remote_deploy_enabled,
     )
+    recovery_controller = RelayRecoveryController(
+        relay_client=relay_client,
+        remote_manager=remote_manager,
+        enabled=settings.relay_recovery_enabled,
+        health_interval_seconds=settings.relay_recovery_health_interval_seconds,
+        redeploy_after_failures=settings.relay_recovery_redeploy_after_failures,
+        redeploy_cooldown_seconds=settings.relay_recovery_redeploy_cooldown_seconds,
+        max_wait_seconds=settings.relay_recovery_max_wait_seconds,
+        remote_deploy_enabled=settings.remote_deploy_enabled,
+    )
+    if settings.relay_recovery_enabled:
+        relay_client.set_recovery_hook(recovery_controller.recover)
 
     sender = RelayStatusSender(relay_client)
     command_task = None
+    recovery_task = None
     try:
         if settings.remote_deploy_enabled:
             log.info("Deploying tg-relay to %s ...", settings.foreign_ssh_host)
             await remote_manager.deploy()
         await remote_manager.ensure_tunnel()
         await relay_client.wait_until_healthy()
+        recovery_task = asyncio.create_task(recovery_controller.run_watchdog())
 
         client = create_max_client(
             settings.max_token,
@@ -330,6 +345,12 @@ async def _run_max_bridge(settings) -> None:
         log.info("Starting Max listener in APP_ROLE=max-bridge ...")
         await client.run()
     finally:
+        if recovery_task is not None:
+            recovery_task.cancel()
+            try:
+                await recovery_task
+            except asyncio.CancelledError:
+                pass
         if command_task is not None:
             command_task.cancel()
             try:
