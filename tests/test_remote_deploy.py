@@ -2,7 +2,9 @@ import shutil
 import tarfile
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from app.remote_deploy import RemoteRelayManager, _format_command_failure
 
@@ -40,6 +42,26 @@ def _populate_workspace_dir(workspace_dir: Path) -> None:
     (workspace_dir / "requirements.txt").write_text("aiohttp\n", encoding="utf-8")
 
 
+class _FakeTunnelProcess:
+    def __init__(self, *, returncode=None):
+        self.returncode = returncode
+        self.terminated = False
+        self.killed = False
+        self.wait_count = 0
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = 0
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self):
+        self.wait_count += 1
+        return self.returncode
+
+
 def test_build_remote_deploy_command_uses_bootstrap_script():
     workspace_dir = _make_workspace_dir()
     _populate_workspace_dir(workspace_dir)
@@ -57,6 +79,58 @@ def test_build_remote_deploy_command_uses_bootstrap_script():
         "&& if [ ! -f ./scripts/bootstrap_remote.sh ]; then echo 'Missing scripts/bootstrap_remote.sh in remote deploy bundle.' >&2; exit 1; fi "
         "&& sh ./scripts/bootstrap_remote.sh"
     )
+
+
+@pytest.mark.asyncio
+async def test_stop_tunnel_terminates_process_without_cleanup():
+    workspace_dir = _make_workspace_dir()
+    _populate_workspace_dir(workspace_dir)
+    manager = _build_manager(workspace_dir)
+    old_proc = _FakeTunnelProcess()
+    manager._tunnel_proc = old_proc
+    cleanup = MagicMock()
+    manager._cleanup_temp_files = cleanup
+    try:
+        await manager.stop_tunnel()
+    finally:
+        manager._tunnel_proc = None
+        shutil.rmtree(manager._temp_dir, ignore_errors=True)
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+
+    assert old_proc.terminated is True
+    assert old_proc.wait_count == 1
+    assert manager._tunnel_proc is None
+    cleanup.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_restart_tunnel_reopens_tunnel_without_cleanup():
+    workspace_dir = _make_workspace_dir()
+    _populate_workspace_dir(workspace_dir)
+    manager = _build_manager(workspace_dir)
+    old_proc = _FakeTunnelProcess()
+    new_proc = _FakeTunnelProcess()
+    manager._tunnel_proc = old_proc
+    cleanup = MagicMock()
+    manager._cleanup_temp_files = cleanup
+    opened_proc = None
+
+    try:
+        with (
+            patch("app.remote_deploy.asyncio.create_subprocess_exec", new=AsyncMock(return_value=new_proc)) as create_proc,
+            patch("app.remote_deploy.asyncio.sleep", new=AsyncMock()),
+        ):
+            await manager.restart_tunnel()
+            opened_proc = manager._tunnel_proc
+    finally:
+        manager._tunnel_proc = None
+        shutil.rmtree(manager._temp_dir, ignore_errors=True)
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+
+    assert old_proc.terminated is True
+    assert opened_proc is new_proc
+    create_proc.assert_awaited_once()
+    cleanup.assert_not_called()
 
 
 def test_build_remote_deploy_command_quotes_remote_dir():

@@ -91,6 +91,7 @@ class RemoteRelayManager:
     async def ensure_tunnel(self) -> None:
         if self._tunnel_proc is not None and self._tunnel_proc.returncode is None:
             return
+        self._tunnel_proc = None
         await self._prepare_local_files()
         args = [
             "ssh",
@@ -127,14 +128,26 @@ class RemoteRelayManager:
                 f"{stdout.decode('utf-8', 'ignore')}\n{stderr.decode('utf-8', 'ignore')}"
             )
 
+    async def stop_tunnel(self) -> None:
+        if self._tunnel_proc is None:
+            return
+        proc = self._tunnel_proc
+        self._tunnel_proc = None
+        if proc.returncode is not None:
+            return
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+
+    async def restart_tunnel(self) -> None:
+        await self.stop_tunnel()
+        await self.ensure_tunnel()
+
     async def close(self) -> None:
-        if self._tunnel_proc is not None and self._tunnel_proc.returncode is None:
-            self._tunnel_proc.terminate()
-            try:
-                await asyncio.wait_for(self._tunnel_proc.wait(), timeout=10)
-            except asyncio.TimeoutError:
-                self._tunnel_proc.kill()
-                await self._tunnel_proc.wait()
+        await self.stop_tunnel()
         self._cleanup_temp_files()
 
     async def _prepare_local_files(self) -> None:

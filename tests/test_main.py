@@ -1,11 +1,92 @@
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 import app.main as main_module
-from app.main import _relay_command_loop
+from app.main import _relay_command_loop, _run_max_bridge
 from app.relay_models import MaxCommand
+
+
+class _FakeRecoveryController:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.cancelled = False
+
+    async def recover(self, reason: str = "test") -> None:
+        del reason
+
+    async def run_watchdog(self) -> None:
+        self.started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+def _bridge_settings(**overrides):
+    settings = {
+        "relay_base_url": "http://127.0.0.1:18080",
+        "relay_shared_secret": "secret",
+        "foreign_ssh_host": "relay.example.com",
+        "foreign_ssh_port": 22,
+        "foreign_ssh_user": "relay",
+        "foreign_ssh_private_key": "key",
+        "foreign_app_dir": "/home/relay/max2tg",
+        "foreign_relay_host_port": 8080,
+        "relay_tunnel_local_port": 18080,
+        "foreign_relay_env_text": "APP_ROLE=tg-relay\n",
+        "remote_deploy_enabled": True,
+        "relay_recovery_enabled": True,
+        "relay_recovery_health_interval_seconds": 30,
+        "relay_recovery_redeploy_after_failures": 3,
+        "relay_recovery_redeploy_cooldown_seconds": 600,
+        "relay_recovery_max_wait_seconds": 120,
+        "max_token": "max-token",
+        "max_device_id": "device",
+        "max_chat_ids": None,
+        "debug": False,
+        "reply_enabled": False,
+    }
+    settings.update(overrides)
+    return SimpleNamespace(**settings)
+
+
+@pytest.mark.asyncio
+async def test_run_max_bridge_starts_and_cancels_recovery_watchdog(monkeypatch):
+    relay_client = MagicMock()
+    relay_client.start = AsyncMock(return_value=None)
+    relay_client.wait_until_healthy = AsyncMock(return_value=None)
+    relay_client.stop = AsyncMock(return_value=None)
+    relay_client.set_recovery_hook = MagicMock()
+    remote_manager = MagicMock()
+    remote_manager.deploy = AsyncMock(return_value=None)
+    remote_manager.ensure_tunnel = AsyncMock(return_value=None)
+    remote_manager.close = AsyncMock(return_value=None)
+    recovery_controller = _FakeRecoveryController()
+    max_client = MagicMock()
+
+    async def _run_until_watchdog_starts():
+        await recovery_controller.started.wait()
+
+    max_client.run = AsyncMock(side_effect=_run_until_watchdog_starts)
+
+    monkeypatch.setattr(main_module, "RelayClient", MagicMock(return_value=relay_client))
+    monkeypatch.setattr(main_module, "RemoteRelayManager", MagicMock(return_value=remote_manager))
+    monkeypatch.setattr(main_module, "RelayRecoveryController", MagicMock(return_value=recovery_controller))
+    monkeypatch.setattr(main_module, "create_max_client", MagicMock(return_value=max_client))
+
+    await _run_max_bridge(_bridge_settings())
+
+    remote_manager.deploy.assert_awaited_once()
+    remote_manager.ensure_tunnel.assert_awaited_once()
+    relay_client.set_recovery_hook.assert_called_once_with(recovery_controller.recover)
+    max_client.run.assert_awaited_once()
+    assert recovery_controller.cancelled is True
+    relay_client.stop.assert_awaited_once()
+    remote_manager.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
